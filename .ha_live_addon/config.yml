@@ -2,7 +2,7 @@ name: Docker Wyze Bridge (Dev Build)
 description: Local staging build of Docker Wyze Bridge for SSH-driven validation before production promotion.
 slug: docker_wyze_bridge_dev
 url: https://github.com/thatdaveguy1/docker-wyze-bridge
-version: 4.0.1
+version: 4.0.2
 stage: stable
 arch:
   - armv7

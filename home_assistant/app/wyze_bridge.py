@@ -17,6 +17,7 @@ from wyzebridge.config import (
 )
 from wyzebridge.auth import WbAuth
 from wyzebridge.bridge_utils import env_bool, env_cam, is_livestream, migrate_path
+from wyzebridge.bridge_diagnostics import collect_bridge_diagnostics
 from wyzebridge.hass import setup_hass
 from wyzebridge.logging import logger
 from wyzebridge.mtx_server import MtxServer
@@ -64,14 +65,28 @@ class WyzeBridge(Thread):
             "active_streams": active_streams,
         }
 
+    def health_details(self, stream_name: str | None = None):
+        return self.health() | collect_bridge_diagnostics(stream_name)
+
     def run(self, fresh_data: bool = False) -> None:
         self._initialize(fresh_data)
 
     def _initialize(self, fresh_data: bool = False) -> None:
         self.api.login(fresh_data=fresh_data)
-        WbAuth.set_email(email=self.api.get_user().email, force=fresh_data)
+        user = self.api.get_user()
+        if user and user.email:
+            WbAuth.set_email(email=user.email, force=fresh_data)
+        elif self.api.creds.email:
+            logger.warning(
+                "[AUTH] Wyze user profile unavailable during init; using configured email fallback for local auth"
+            )
+            WbAuth.set_email(email=self.api.creds.email, force=fresh_data)
+        else:
+            logger.warning(
+                "[AUTH] Wyze user profile unavailable during init and no email fallback is configured"
+            )
         self.mtx.setup_auth(WbAuth.api, STREAM_AUTH)
-        self.setup_streams()
+        self.setup_streams(user)
         if self.streams.total < 1:
             return signal.raise_signal(signal.SIGINT)
 
@@ -92,9 +107,12 @@ class WyzeBridge(Thread):
         self.api.get_cameras(fresh_data=True)
         self._initialize(False)
 
-    def setup_streams(self):
+    def setup_streams(self, user: WyzeAccount | None = None):
         """Gather and setup streams for each camera."""
-        user = self.api.get_user()
+        user = user or self.api.get_user()
+        if not user:
+            logger.error("[BRIDGE] Unable to load Wyze user profile; skipping stream setup")
+            return
 
         for cam in self.api.filtered_cams():
             logger.info(

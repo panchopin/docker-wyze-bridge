@@ -1,5 +1,16 @@
 # What's Changed
 
+## What's Changed in v4.0.2
+
+Patch release focused on startup hardening and Home Assistant runtime validation.
+
+### Major Changes
+
+- Gate WHEP downstream output tracks on real upstream media readiness instead of local track allocation alone.
+- Prevent bridge startup crashes when Wyze login succeeds but `get_user_info` fails or returns empty by falling back to the configured email for local auth/bootstrap needs.
+- Add regression coverage for the fallback-user path and keep add-on release metadata aligned for the `4.0.2` patch line.
+- Carry forward the minimal Home Assistant prod/dev swap workflow and in-app diagnostics approach used during live validation.
+
 ## What's Changed in v4.0.1
 
 Patch release focused on Home Assistant packaging and documentation clarity.

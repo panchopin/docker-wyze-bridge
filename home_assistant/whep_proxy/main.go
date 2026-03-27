@@ -104,10 +104,10 @@ func (stream *WebRTCStream) outputTracks() []*webrtc.TrackLocalStaticRTP {
 	defer stream.mediaMu.RUnlock()
 
 	tracks := make([]*webrtc.TrackLocalStaticRTP, 0, 2)
-	if stream.videoTrack != nil {
+	if stream.videoTrack != nil && stream.videoReady.Load() {
 		tracks = append(tracks, stream.videoTrack)
 	}
-	if stream.audioTrack != nil {
+	if stream.audioTrack != nil && stream.audioReady.Load() {
 		tracks = append(tracks, stream.audioTrack)
 	}
 	return tracks
@@ -127,7 +127,10 @@ func (stream *WebRTCStream) canReuse() bool {
 	if stream == nil || stream.destroyed.Load() {
 		return false
 	}
-	return stream.videoTrack != nil || stream.audioTrack != nil
+	if stream.videoReady.Load() || stream.audioReady.Load() {
+		return true
+	}
+	return stream.currentUpstream() != nil || stream.reconnecting.Load()
 }
 
 func (stream *WebRTCStream) setVideoSource(track *webrtc.TrackRemote) {
@@ -207,7 +210,17 @@ func shouldLogRTCPEnd(err error) bool {
 	return !errors.Is(err, io.EOF)
 }
 
-func logNormalClose(session *UpstreamSession, streamID string, closeInfo wsCloseInfo) {
+func logNormalClose(
+	session *UpstreamSession,
+	streamID string,
+	closeInfo wsCloseInfo,
+	peerState webrtc.PeerConnectionState,
+	iceState webrtc.ICEConnectionState,
+	videoReady bool,
+	audioReady bool,
+	upstreamAlive bool,
+	whepClients int32,
+) {
 	if session == nil || !session.normalCloseLogged.CompareAndSwap(false, true) {
 		return
 	}
@@ -215,7 +228,44 @@ func logNormalClose(session *UpstreamSession, streamID string, closeInfo wsClose
 	if reason == "" {
 		reason = "normal closure"
 	}
-	log.Printf("[WHEP_PROXY] Upstream session rotated for %s: websocket close code=%d reason=%q", streamID, closeInfo.code, reason)
+	log.Printf(
+		"[WHEP_PROXY] Upstream session rotated for %s: websocket close code=%d reason=%q peer=%s ice=%s video_ready=%t audio_ready=%t upstream_alive=%t whep_clients=%d session_age=%s",
+		streamID,
+		closeInfo.code,
+		reason,
+		peerState.String(),
+		iceState.String(),
+		videoReady,
+		audioReady,
+		upstreamAlive,
+		whepClients,
+		time.Since(session.startedAt).Round(time.Millisecond),
+	)
+}
+
+func shouldReconnectOnNormalWSClosure(state webrtc.PeerConnectionState, videoReady bool, audioReady bool) bool {
+	switch state {
+	case webrtc.PeerConnectionStateConnected:
+		return false
+	case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
+		return true
+	}
+
+	return !(videoReady || audioReady)
+}
+
+func closeNormalRotationWebsocket(session *UpstreamSession) {
+	if session == nil {
+		return
+	}
+
+	session.wsMu.Lock()
+	defer session.wsMu.Unlock()
+	if session.wsConn == nil {
+		return
+	}
+	_ = session.wsConn.Close()
+	session.wsConn = nil
 }
 
 func (stream *WebRTCStream) currentUpstream() *UpstreamSession {
@@ -1224,8 +1274,29 @@ func establishUpstream(stream *WebRTCStream) error {
 			messageType, data, err := conn.ReadMessage()
 			if err != nil {
 				closeInfo := classifyWSReadError(err)
+				state := webrtc.PeerConnectionStateClosed
+				iceState := webrtc.ICEConnectionStateClosed
+				if session.peerConnection != nil {
+					state = session.peerConnection.ConnectionState()
+					iceState = session.peerConnection.ICEConnectionState()
+				}
+				videoReady := stream.videoReady.Load()
+				audioReady := stream.audioReady.Load()
+				upstreamAlive := stream.upstreamAlive.Load()
+				whepClients := stream.whepClients.Load()
 				if closeInfo.normal {
-					logNormalClose(session, stream.streamID, closeInfo)
+					logNormalClose(session, stream.streamID, closeInfo, state, iceState, videoReady, audioReady, upstreamAlive, whepClients)
+					if !shouldReconnectOnNormalWSClosure(state, videoReady, audioReady) {
+						log.Printf(
+							"[WHEP_PROXY] Keeping upstream peer alive for %s after normal websocket close: peer=%s video_ready=%t audio_ready=%t",
+							stream.streamID,
+							state.String(),
+							videoReady,
+							audioReady,
+						)
+						closeNormalRotationWebsocket(session)
+						return
+					}
 				} else if closeInfo.code != 0 {
 					log.Printf("[WHEP_PROXY] Websocket closed by peer for %s: code=%d reason=%q", stream.streamID, closeInfo.code, closeInfo.reason)
 				} else if !errors.Is(err, io.EOF) {

@@ -148,6 +148,11 @@ def create_app():
         health_data = wb.health()
         return Response(json.dumps(health_data), mimetype="application/json")
 
+    @app.route("/health/details")
+    def health_details():
+        details = wb.health_details(request.args.get("stream"))
+        return Response(json.dumps(details), mimetype="application/json")
+
     @app.route("/api/sse_status")
     @auth_required
     def sse_status():

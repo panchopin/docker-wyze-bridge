@@ -225,8 +225,42 @@ class WyzeApi:
             return self.user
 
         if self.auth:
-            self.user = get_user_info(self.auth)
+            try:
+                self.user = get_user_info(self.auth)
+            except (ConnectionError, RateLimitError, RequestException, WyzeAPIError) as ex:
+                logger.error(f"[API] Failed to fetch user info [{type(ex).__name__}] {ex}")
+                return self._fallback_user("Wyze user info request failed")
 
+        if not self.user:
+            return self._fallback_user("Wyze user info was empty")
+
+        return self.user
+
+    def _fallback_user(self, reason: str) -> Optional[WyzeAccount]:
+        if self.user:
+            return self.user
+
+        email = (self.creds.email or "").strip()
+        if not email:
+            logger.error(
+                f"[API] Unable to build fallback user profile ({reason.lower()}): email unavailable"
+            )
+            return None
+
+        nickname = email.partition("@")[0] or "wyze"
+        phone_id = self.auth.phone_id if self.auth and self.auth.phone_id else ""
+        self.user = WyzeAccount(
+            phone_id=phone_id,
+            logo="",
+            nickname=nickname,
+            email=email,
+            user_code="",
+            user_center_id="",
+            open_user_id="",
+        )
+        logger.warning(
+            f"[API] Using fallback user profile because {reason.lower()}; account email is still available for bridge startup"
+        )
         return self.user
 
     @cached

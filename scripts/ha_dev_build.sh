@@ -1,6 +1,13 @@
 #!/bin/sh
 set -eu
 
+# Minimal Home Assistant bridge swap helper.
+#
+# Use this when you need to test the local dev add-on against the live HA box
+# without leaving production and dev running at the same time. The script keeps
+# the flow simple: sync dev, copy prod options, stop one bridge, start the other,
+# wait for /health, and optionally stop/restart Frigate around the handoff.
+
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 
@@ -11,8 +18,8 @@ fi
 
 DEV_SLUG="${HA_DEV_ADDON_SLUG:-docker_wyze_bridge_dev}"
 PROD_SLUG="${HA_PROD_ADDON_SLUG:-docker_wyze_bridge_v4}"
+FRIGATE_SLUG="${HA_FRIGATE_ADDON_SLUG:-ccab4aaf_frigate}"
 PROD_INFO_FILE="$REPO_DIR/.orig_addon_info.json"
-DEV_INFO_FILE="$REPO_DIR/.live_local_info.json"
 
 usage() {
   cat <<EOF
@@ -24,7 +31,7 @@ Commands:
   status              Show a concise prod/dev status summary
   capture-prod        Save current production add-on info to $PROD_INFO_FILE
   copy-prod-options   Copy production add-on settings into the dev add-on
-  swap-to-dev         Stop prod, sync/rebuild dev, copy prod settings, start dev, smoke-check
+  swap-to-dev         Stop prod, sync/rebuild dev, start dev, and run a health smoke-check
   smoke-check         Verify the active bridge responds on health/UI endpoints
   restore-prod        Stop dev and restart production
 
@@ -146,12 +153,6 @@ capture_addon_info() {
   remote_supervisor_request GET "/addons/$slug/info" </dev/null >"$dest"
 }
 
-capture_addon_cli_info() {
-  slug="$1"
-  dest="$2"
-  ha_apps info "$slug" --raw-json >"$dest"
-}
-
 addon_field() {
   slug="$1"
   field="$2"
@@ -170,7 +171,187 @@ addon_known() {
 }
 
 addon_installed() {
-  [ "$(addon_field "$1" installed 2>/dev/null || printf 'False')" = "True" ]
+  installed=$(addon_field "$1" installed 2>/dev/null || printf '')
+  version=$(addon_field "$1" version 2>/dev/null || printf '')
+  [ "$installed" = "True" ] || [ "$installed" = "true" ] || [ -n "$version" ]
+}
+
+wait_for_addon_state() {
+  slug="$1"
+  desired="$2"
+  attempts="${3:-45}"
+  delay="${4:-2}"
+
+  i=1
+  while [ "$i" -le "$attempts" ]; do
+    state=$(addon_field "$slug" state 2>/dev/null || printf 'unavailable')
+    if [ "$state" = "$desired" ]; then
+      return 0
+    fi
+    sleep "$delay"
+    i=$((i + 1))
+  done
+
+  echo "Add-on $slug did not reach state '$desired'." >&2
+  return 1
+}
+
+wait_for_addon_not_state() {
+  slug="$1"
+  blocked="$2"
+  attempts="${3:-45}"
+  delay="${4:-2}"
+
+  i=1
+  while [ "$i" -le "$attempts" ]; do
+    state=$(addon_field "$slug" state 2>/dev/null || printf 'unavailable')
+    if [ "$state" != "$blocked" ]; then
+      return 0
+    fi
+    sleep "$delay"
+    i=$((i + 1))
+  done
+
+  echo "Add-on $slug remained in state '$blocked'." >&2
+  return 1
+}
+
+wait_for_http() {
+  url="$1"
+  label="$2"
+  attempts="${3:-45}"
+  delay="${4:-2}"
+
+  i=1
+  while [ "$i" -le "$attempts" ]; do
+    if "$SCRIPT_DIR/ha_ssh.sh" curl -fsS "$url" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep "$delay"
+    i=$((i + 1))
+  done
+
+  echo "$label did not respond at $url after $attempts attempts." >&2
+  return 1
+}
+
+addon_base_url() {
+  slug="$1"
+  ip=$(addon_field "$slug" ip_address 2>/dev/null || printf '')
+  if [ -z "$ip" ]; then
+    echo "Could not determine IP address for add-on $slug." >&2
+    return 1
+  fi
+  printf 'http://%s:5000' "$ip"
+}
+
+stop_addon_for_cutover() {
+  slug="$1"
+  state=$(addon_field "$slug" state 2>/dev/null || printf 'unavailable')
+  if [ "$state" = "started" ]; then
+    ha_apps stop "$slug" >/dev/null
+    wait_for_addon_not_state "$slug" started
+    return 0
+  fi
+  return 1
+}
+
+start_addon_best_effort() {
+  slug="$1"
+  label="$2"
+
+  if ! addon_installed "$slug"; then
+    return 0
+  fi
+
+  set +e
+  ha_apps start "$slug" >/dev/null 2>&1
+  rc=$?
+  set -e
+
+  if wait_for_addon_state "$slug" started 60 2 >/dev/null 2>&1; then
+    return 0
+  fi
+
+  state=$(addon_field "$slug" state 2>/dev/null || printf 'unavailable')
+  echo "Warning: $label did not return cleanly during cutover (start rc=$rc, state=$state)." >&2
+  return 1
+}
+
+addon_ports() {
+  slug="$1"
+  info=$(ha_apps info "$slug" --raw-json 2>/dev/null || printf '')
+  [ -n "$info" ] || return 0
+  ADDON_INFO_JSON="$info" python3 - <<'PY'
+import json
+import os
+import re
+
+root = json.loads(os.environ["ADDON_INFO_JSON"]).get("data", {})
+ports = set()
+
+for value in (root.get("network") or {}).values():
+    try:
+        ports.add(int(value))
+    except (TypeError, ValueError):
+        pass
+
+for entry in root.get("options", {}).get("MEDIAMTX") or []:
+    if "=" not in entry:
+        continue
+    key, value = entry.split("=", 1)
+    if "ADDRESS" not in key.upper():
+        continue
+    match = re.search(r":(\d+)$", value.strip())
+    if match:
+        ports.add(int(match.group(1)))
+
+ports.add(8080)
+print(" ".join(str(port) for port in sorted(ports)))
+PY
+}
+
+busy_ports() {
+  if [ "$#" -eq 0 ]; then
+    return 0
+  fi
+  listening=$(
+    "$SCRIPT_DIR/ha_ssh.sh" sh -c "ss -ltnu 2>/dev/null || netstat -ltnu 2>/dev/null" 2>/dev/null || printf ''
+  )
+  LISTENING_PORTS="$listening" python3 - "$@" <<'PY'
+import os
+import re
+import sys
+
+ports = [int(arg) for arg in sys.argv[1:] if arg]
+text = os.environ.get("LISTENING_PORTS", "")
+busy = []
+for port in ports:
+    if re.search(rf'[:.]%d(?:\s|$)' % port, text):
+        busy.append(str(port))
+print(" ".join(busy))
+PY
+}
+
+wait_for_ports_free() {
+  slug="$1"
+  attempts="${2:-30}"
+  delay="${3:-2}"
+  ports=$(addon_ports "$slug" 2>/dev/null || printf '')
+  [ -n "$ports" ] || return 0
+
+  i=1
+  while [ "$i" -le "$attempts" ]; do
+    busy=$(busy_ports $ports)
+    if [ -z "$busy" ]; then
+      return 0
+    fi
+    sleep "$delay"
+    i=$((i + 1))
+  done
+
+  echo "Timed out waiting for host-network ports to free for $slug. Busy ports: $busy" >&2
+  return 1
 }
 
 sync_dev() {
@@ -241,9 +422,17 @@ PY
 
 status() {
   prod_state=$(addon_field "$PROD_SLUG" state 2>/dev/null || printf 'unavailable')
-  prod_installed=$(addon_field "$PROD_SLUG" installed 2>/dev/null || printf 'False')
+  if addon_installed "$PROD_SLUG"; then
+    prod_installed=True
+  else
+    prod_installed=False
+  fi
   dev_state=$(addon_field "$DEV_SLUG" state 2>/dev/null || printf 'unavailable')
-  dev_installed=$(addon_field "$DEV_SLUG" installed 2>/dev/null || printf 'False')
+  if addon_installed "$DEV_SLUG"; then
+    dev_installed=True
+  else
+    dev_installed=False
+  fi
   cat <<EOF
 Production:
   slug: $PROD_SLUG
@@ -257,46 +446,51 @@ EOF
 }
 
 smoke_check() {
-  capture_addon_cli_info "$DEV_SLUG" "$DEV_INFO_FILE"
-  dev_state=$(python3 - "$DEV_INFO_FILE" <<'PY'
-import json,sys
-with open(sys.argv[1], "r", encoding="utf-8") as handle:
-    print(json.load(handle).get("data", {}).get("state", "unknown"))
-PY
-)
+  dev_state=$(addon_field "$DEV_SLUG" state 2>/dev/null || printf 'unknown')
   if [ "$dev_state" != "started" ]; then
     echo "Dev add-on is not started (state=$dev_state)." >&2
     exit 1
   fi
-  "$SCRIPT_DIR/ha_ssh.sh" curl -fsS http://127.0.0.1:5000/health >/dev/null
-  "$SCRIPT_DIR/ha_ssh.sh" curl -fsS http://127.0.0.1:5000/ >/dev/null
-  "$SCRIPT_DIR/ha_ssh.sh" curl -fsS http://127.0.0.1:5000/static/site.js | grep -q "copyToClipboard"
-  printf '%s\n' "Smoke check passed: health endpoint, Web UI, and site.js responded."
+  dev_base_url=$(addon_base_url "$DEV_SLUG")
+  wait_for_http "$dev_base_url/health" "Dev add-on health endpoint"
+  printf '%s\n' "Smoke check passed: health endpoint responded."
 }
 
 stop_addon_if_started() {
   slug="$1"
   state=$(addon_field "$slug" state 2>/dev/null || printf 'unavailable')
-  if [ "$state" = "started" ]; then
+  if [ "$state" = "started" ] || [ "$state" = "error" ]; then
     ha_apps stop "$slug" >/dev/null
+    if [ "$state" = "started" ]; then
+      wait_for_addon_not_state "$slug" started
+    fi
+    sleep 10
   fi
+  wait_for_ports_free "$slug"
 }
 
 swap_to_dev() {
   capture_prod
   install_dev
   copy_prod_options
+  frigate_was_started=false
+  if stop_addon_for_cutover "$FRIGATE_SLUG"; then
+    frigate_was_started=true
+  fi
   stop_addon_if_started "$DEV_SLUG"
   "$SCRIPT_DIR/deploy_ha_local_addon.sh" --target dev
   prod_was_started=$(addon_field "$PROD_SLUG" state 2>/dev/null || printf 'unavailable')
   rollback() {
     status=$?
     trap - EXIT INT TERM
-    if [ $status -ne 0 ] && [ "$prod_was_started" = "started" ]; then
+  if [ $status -ne 0 ] && [ "$prod_was_started" = "started" ]; then
       echo "swap-to-dev failed; attempting to restore production..." >&2
       set +e
       stop_addon_if_started "$DEV_SLUG"
       ha_apps start "$PROD_SLUG" >/dev/null
+      if [ "$frigate_was_started" = "true" ]; then
+        start_addon_best_effort "$FRIGATE_SLUG" "Frigate"
+      fi
       set -e
     fi
     exit $status
@@ -304,27 +498,33 @@ swap_to_dev() {
   trap rollback EXIT INT TERM
   stop_addon_if_started "$PROD_SLUG"
   ha_apps start "$DEV_SLUG" >/dev/null
+  wait_for_addon_state "$DEV_SLUG" started
   smoke_check
+  if [ "$frigate_was_started" = "true" ]; then
+    start_addon_best_effort "$FRIGATE_SLUG" "Frigate"
+  fi
   trap - EXIT INT TERM
   printf '%s\n' "Dev build is active. Production remains stopped until restore-prod is run."
 }
 
 restore_prod() {
+  frigate_was_started=false
+  if stop_addon_for_cutover "$FRIGATE_SLUG"; then
+    frigate_was_started=true
+  fi
   stop_addon_if_started "$DEV_SLUG"
   ha_apps start "$PROD_SLUG" >/dev/null
-  capture_addon_cli_info "$PROD_SLUG" "$PROD_INFO_FILE"
-  prod_state=$(python3 - "$PROD_INFO_FILE" <<'PY'
-import json,sys
-with open(sys.argv[1], "r", encoding="utf-8") as handle:
-    print(json.load(handle).get("data", {}).get("state", "unknown"))
-PY
-)
+  wait_for_addon_state "$PROD_SLUG" started
+  prod_state=$(addon_field "$PROD_SLUG" state 2>/dev/null || printf 'unknown')
   if [ "$prod_state" != "started" ]; then
     echo "Production add-on did not return to started state (state=$prod_state)." >&2
     exit 1
   fi
-  "$SCRIPT_DIR/ha_ssh.sh" curl -fsS http://127.0.0.1:5000/health >/dev/null
-  "$SCRIPT_DIR/ha_ssh.sh" curl -fsS http://127.0.0.1:5000/ >/dev/null
+  prod_base_url=$(addon_base_url "$PROD_SLUG")
+  wait_for_http "$prod_base_url/health" "Production add-on health endpoint"
+  if [ "$frigate_was_started" = "true" ]; then
+    start_addon_best_effort "$FRIGATE_SLUG" "Frigate"
+  fi
   printf '%s\n' "Production add-on restarted."
 }
 

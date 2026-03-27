@@ -1,6 +1,6 @@
 # Troubleshooting Guide
 
-This guide covers common issues and questions for the **Docker Wyze Bridge V4.0.1**.
+This guide covers common issues and questions for the **Docker Wyze Bridge V4.0.2**.
 
 ## Login and API Issues
 

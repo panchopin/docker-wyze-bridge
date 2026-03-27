@@ -1,6 +1,6 @@
-# Release Notes V4.0.1
+# Release Notes V4.0.2
 
-The **Docker Wyze Bridge V4.0.1** is a focused patch release for the V4 fork line. It keeps the streaming behavior from `4.0.0` and concentrates on clearer Home Assistant packaging and support messaging.
+The **Docker Wyze Bridge V4.0.2** is a focused patch release for the V4 fork line. It keeps the broader platform direction from `4.0.0` and the Home Assistant cleanup from `4.0.1`, then adds startup hardening around the real bridge/runtime issues found during Home Assistant live validation.
 
 ## Why this Fork Exists?
 
@@ -12,21 +12,25 @@ This fork aims to:
 - Stabilize the bridge for 24/7 streaming reliability.
 - Support modern WebRTC-backed RTSP and HLS delivery.
 
-## What's New in V4.0.1
+## What's New in V4.0.2
 
-### Home Assistant login defaults
-- **Visible by default:** The standard Home Assistant login path now surfaces `Wyze email`, `Wyze password`, `Key ID`, and `API key` without requiring users to show hidden optional fields first.
-- **Packaging coverage:** The add-on packaging test now locks in those defaults for both the production and dev add-on manifests.
+### Startup stability hardening
+- **Ready-only downstream tracks:** The WHEP proxy no longer treats preallocated local RTP tracks as usable output. Downstream clients only see tracks after upstream audio/video media is actually ready.
+- **Better startup behavior:** This reduces the chance that on-demand WHEP and RTSP consumers attach during the earliest startup gap and trigger failures like `deadline exceeded while waiting tracks`.
 
-### Home Assistant wording cleanup
-- **Clearer login copy:** HA-facing docs and translations now describe the standard login path consistently as email, password, Key ID, and API key.
-- **Support-aware sub-stream text:** HA-facing wording now explains that sub-stream support follows the internal capability map and that Pan V2 is not currently included.
+### Bridge init hardening
+- **Fallback user profile:** If Wyze authentication succeeds but `get_user_info` fails or returns empty, the bridge now derives the minimum local account context from the configured Wyze email instead of crashing during startup.
+- **Safer local auth setup:** Home Assistant startup can continue far enough to initialize streams and diagnostics even when the richer Wyze account profile is temporarily unavailable.
 
-### KVS scope for this patch
-- **No KVS behavior change:** This patch does not change KVS startup or playback behavior.
-- **Dev-lane validation only:** The reported KVS `400` warning was not reproduced in the Home Assistant dev add-on lane during this release pass, so no KVS logging or runtime fix is included in `4.0.1`.
+### Home Assistant validation workflow
+- **Minimal swap helper:** The prod/dev handoff helper stays intentionally small and reversible instead of taking on stream-specific diagnostics logic.
+- **In-app diagnostics first:** The release workflow now leans on `/health/details` and focused live logs for runtime validation inside the add-on namespace.
 
-## What V4.0 already introduced
+### Scope and notes for this patch
+- **Patch-level release:** `4.0.2` is a runtime reliability release, not a feature expansion release.
+- **Validated path:** The auth/init crash was fixed and the follow-up Home Assistant dev-lane validation completed cleanly with `dog-run` reaching `video_ready=true`, `audio_ready=true`, and `upstream_alive=true` during the successful startup pass.
+
+## What V4.0 and V4.0.1 already introduced
 
 ### Wyze Cam V4 Support
 - **New KVS/WebRTC Backend:** In the current code, the KVS/WebRTC path is the default for all WebRTC-capable cameras, not just V4. That includes V3, V3 Pro, V4, Pan, Pan V2, Pan V3, Floodlight V2, Floodlight Pro, OG, and other models that are not in the `NO_WEBRTC` list.

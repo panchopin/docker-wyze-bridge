@@ -74,7 +74,7 @@ class TestHomeAssistantAddonPackaging(unittest.TestCase):
         )
         self.assertEqual(dev_slug.group(1).strip(), "docker_wyze_bridge_dev")
         self.assertEqual(dev_name.group(1).strip(), "Docker Wyze Bridge (Dev Build)")
-        self.assertEqual(dev_version.group(1).strip(), "4.0.1")
+        self.assertEqual(dev_version.group(1).strip(), "4.0.2")
 
     def test_local_dev_addon_yaml_and_yml_manifests_match(self):
         dev_yml = (ROOT / ".ha_live_addon" / "config.yml").read_text()

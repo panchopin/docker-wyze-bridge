@@ -60,6 +60,13 @@ ha_apps() {
   "$SCRIPT_DIR/ha_ssh.sh" ha apps "$@"
 }
 
+addon_field() {
+  slug="$1"
+  field="$2"
+  info=$(ha_apps info "$slug" --raw-json)
+  printf '%s' "$info" | python3 -c 'import json,sys; data=json.load(sys.stdin).get("data", {}); value=data.get(sys.argv[1], ""); print(value if value is not None else "")' "$field"
+}
+
 copy_file() {
   src="$1"
   dest="$2"
@@ -114,6 +121,16 @@ case "$TARGET" in
     sync_dev_tree
     ;;
   prod)
+    PROD_REPOSITORY=$(addon_field "$APP_SLUG" repository 2>/dev/null || printf '')
+    if [ "$PROD_REPOSITORY" != "local" ]; then
+      cat >&2 <<EOF
+Refusing prod source sync for $APP_SLUG.
+The installed production add-on is built from repository '$PROD_REPOSITORY', not from $REMOTE_ROOT.
+Syncing files into $REMOTE_ROOT will not change the running production image.
+Use the dev add-on lane (scripts/ha_dev_build.sh swap-to-dev) for parity-safe live testing, or patch the actual repository source that Supervisor rebuilds.
+EOF
+      exit 1
+    fi
     sync_prod_patch
     ;;
   *)

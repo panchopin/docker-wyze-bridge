@@ -1,8 +1,8 @@
-name: Docker Wyze Bridge V4.0.1
+name: Docker Wyze Bridge V4.0.2
 description: WebRTC/RTSP/RTMP/LL-HLS bridge for Wyze cams with V4 support and Home Assistant optimizations.
 slug: docker_wyze_bridge_v4
 url: https://github.com/thatdaveguy1/docker-wyze-bridge
-version: 4.0.1
+version: 4.0.2
 stage: stable
 arch:
   - armv7

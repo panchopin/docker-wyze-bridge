@@ -1,6 +1,6 @@
 # Home Assistant Install Guide
 
-The **Docker Wyze Bridge V4.0.1** is available as a Home Assistant Add-on. This is the easiest way to integrate your Wyze cameras into Home Assistant.
+The **Docker Wyze Bridge V4.0.2** is available as a Home Assistant Add-on. This is the easiest way to integrate your Wyze cameras into Home Assistant.
 
 ## Prerequisites
 
@@ -20,7 +20,7 @@ The **Docker Wyze Bridge V4.0.1** is available as a Home Assistant Add-on. This 
 
 ## Step 2: Install the Add-on
 
-1.  The **Docker Wyze Bridge (V4.0.1)** should now be visible in the Add-on Store.
+1.  The **Docker Wyze Bridge (V4.0.2)** should now be visible in the Add-on Store.
     *Note: If you don't see it, try refreshing the page or checking the store for a "New Repositories" section.*
 2.  Select the add-on and click **Install**.
 3.  Wait for the installation to complete (this may take a few minutes).
@@ -60,7 +60,7 @@ Advanced users can override MediaMTX port behavior through the add-on configurat
 
 ## Supported Cameras
 
-The V4.0.1 release includes specific fixes and improvements for:
+The V4.0.2 release includes specific fixes and improvements for:
 - **Wyze Cam V4:** Uses the default KVS/WebRTC path and is a major focus of this fork.
 - **Wyze Cam V3 and V3 Pro:** Also use the default KVS/WebRTC path for lower latency and better stability.
 - All other Wyze cameras are supported via the standard bridge path.
