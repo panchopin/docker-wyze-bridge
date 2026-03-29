@@ -4,12 +4,15 @@ import pathlib
 import sys
 import unittest
 import importlib
+import types
 from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(
     0, str(pathlib.Path(__file__).resolve().parent.parent / ".ha_live_addon" / "app")
 )
+
+sys.modules.setdefault("yaml", types.ModuleType("yaml"))
 
 def make_camera(model: str = "HL_CAM4", nickname: str = "North Yard"):
     return SimpleNamespace(
@@ -18,6 +21,7 @@ def make_camera(model: str = "HL_CAM4", nickname: str = "North Yard"):
         product_model=model,
         is_kvs=True,
         bridge_can_substream=True,
+        camera_info=None,
     )
 
 
@@ -49,8 +53,38 @@ class FakeStreams:
     def add(self, stream):
         self.added.append(stream)
 
+    def get_info(self, _uri):
+        return {}
+
 
 class TestBridgeKVSStartupBehavior(unittest.TestCase):
+    def test_camera_feed_config_honors_explicit_hd_sd_env_defaults(self):
+        sys.modules.pop("wyze_bridge", None)
+        with patch("os.makedirs"):
+            WyzeBridge = importlib.import_module("wyze_bridge").WyzeBridge
+
+        bridge = WyzeBridge.__new__(WyzeBridge)
+        bridge.camera_hd_supported = lambda camera: True
+        bridge.camera_sd_supported = lambda camera: True
+        bridge.camera_feed_resolution = (
+            lambda camera, feed: "2560x1440" if feed == "hd" else "640x360"
+        )
+
+        with (
+            patch("wyze_bridge.get_camera_setting", side_effect=lambda _cam, _key, default="": default),
+            patch.dict(
+                "os.environ",
+                {"HD_NORTH_YARD": "False", "SD_NORTH_YARD": "True"},
+                clear=False,
+            ),
+        ):
+            bridge.streams = FakeStreams()
+            config = bridge.camera_feed_config(make_camera())
+
+        self.assertEqual(config["mode"], "sub")
+        self.assertFalse(config["feeds"]["hd"]["enabled"])
+        self.assertTrue(config["feeds"]["sd"]["enabled"])
+
     def test_setup_streams_does_not_eagerly_start_kvs_proxy(self):
         sys.modules.pop("wyze_bridge", None)
         with patch("os.makedirs"):
@@ -68,7 +102,7 @@ class TestBridgeKVSStartupBehavior(unittest.TestCase):
 
         with (
             patch("wyze_bridge.WyzeStream", FakeStream),
-            patch("wyze_bridge.env_cam", side_effect=lambda key, name_uri, default=None: default),
+            patch("wyze_bridge.env_cam", side_effect=lambda key, name_uri, default=None, style="": default),
             patch("wyze_bridge.is_livestream", return_value=False),
             patch("wyze_bridge.ON_DEMAND", True),
         ):
@@ -94,8 +128,11 @@ class TestBridgeKVSStartupBehavior(unittest.TestCase):
 
         with (
             patch("wyze_bridge.WyzeStream", FakeStream),
-            patch("wyze_bridge.get_camera_setting", return_value="sub"),
-            patch("wyze_bridge.env_cam", side_effect=lambda key, name_uri, default=None: default),
+            patch(
+                "wyze_bridge.get_camera_setting",
+                side_effect=lambda _cam, key, default="": "sub" if key == "stream" else default,
+            ),
+            patch("wyze_bridge.env_cam", side_effect=lambda key, name_uri, default=None, style="": default),
             patch("wyze_bridge.is_livestream", return_value=False),
             patch("wyze_bridge.ON_DEMAND", True),
         ):
@@ -120,8 +157,11 @@ class TestBridgeKVSStartupBehavior(unittest.TestCase):
 
         with (
             patch("wyze_bridge.WyzeStream", FakeStream),
-            patch("wyze_bridge.get_camera_setting", return_value="both"),
-            patch("wyze_bridge.env_cam", side_effect=lambda key, name_uri, default=None: default),
+            patch(
+                "wyze_bridge.get_camera_setting",
+                side_effect=lambda _cam, key, default="": "both" if key == "stream" else default,
+            ),
+            patch("wyze_bridge.env_cam", side_effect=lambda key, name_uri, default=None, style="": default),
             patch("wyze_bridge.is_livestream", return_value=False),
             patch("wyze_bridge.ON_DEMAND", True),
         ):
@@ -138,6 +178,7 @@ class TestBridgeKVSStartupBehavior(unittest.TestCase):
             WyzeBridge = importlib.import_module("wyze_bridge").WyzeBridge
 
         bridge = WyzeBridge.__new__(WyzeBridge)
+        bridge.streams = FakeStreams()
         camera = make_camera()
         camera.bridge_can_substream = False
 
@@ -152,11 +193,12 @@ class TestBridgeKVSStartupBehavior(unittest.TestCase):
         bridge = WyzeBridge.__new__(WyzeBridge)
         bridge.streams = FakeStreams()
         bridge.mtx = FakeMtx()
+        bridge.camera_substream_enabled = lambda _cam: True
 
         with (
             patch("wyze_bridge.WyzeStream", FakeStream),
-            patch("wyze_bridge.env_bool", side_effect=lambda key, default="": key == "SUBSTREAM"),
-            patch("wyze_bridge.env_cam", side_effect=lambda key, name_uri, default=None: default),
+            patch("wyze_bridge.env_bool", side_effect=lambda key, false="", true="", style="": key == "SUBSTREAM"),
+            patch("wyze_bridge.env_cam", side_effect=lambda key, name_uri, default=None, style="": default),
         ):
             bridge.add_substream(
                 SimpleNamespace(email="test@example.com"),

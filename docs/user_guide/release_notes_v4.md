@@ -9,6 +9,14 @@ The short version:
 - Home Assistant support for the native `go2rtc` RTSP path is still included.
 - The docs now describe what really works today, in much plainer terms.
 
+## Planned 4.2.1 Follow-up
+
+This repository also includes an unreleased `4.2.1` patch candidate.
+
+- Home Assistant now treats explicit per-camera `CAM_OPTIONS` `HD` and `SD` values as the runtime default feed state.
+- That means an `SD`-only camera setup no longer depends on a hidden `/config/wyze_camera_settings.json` file just to match the visible add-on config.
+- The fix was validated in the dev add-on with the runtime settings file removed, then production was restored with the intended `SD`-only defaults.
+
 ## Biggest Changes
 
 ### Easier feed controls in the Web UI

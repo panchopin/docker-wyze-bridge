@@ -191,6 +191,15 @@ class WyzeBridge(Thread):
     def camera_feed_config(self, cam: WyzeCamera) -> dict:
         hd_supported = self.camera_hd_supported(cam)
         sd_supported = self.camera_sd_supported(cam)
+        env_uri = cam.name_uri.upper().replace("-", "_")
+        hd_env_configured = any(
+            os.getenv(key) is not None
+            for key in (f"HD_{env_uri}", "HD_ALL", "HD")
+        )
+        sd_env_configured = any(
+            os.getenv(key) is not None
+            for key in (f"SD_{env_uri}", "SD_ALL", "SD")
+        )
         legacy_mode = str(
             get_camera_setting(cam.name_uri, "stream", "__missing__")
             if get_camera_setting(cam.name_uri, "stream", "__missing__") != "__missing__"
@@ -204,11 +213,15 @@ class WyzeBridge(Thread):
         hd_enabled = (
             bool(hd_enabled_saved)
             if hd_enabled_saved != "__missing__"
+            else env_cam("hd", cam.name_uri, style="bool")
+            if hd_env_configured
             else legacy_mode not in {"sub"}
         ) and hd_supported
         sd_enabled = (
             bool(sd_enabled_saved)
             if sd_enabled_saved != "__missing__"
+            else env_cam("sd", cam.name_uri, style="bool")
+            if sd_env_configured
             else legacy_mode in {"sub", "both"} or (legacy_mode == "" and default_sd_enabled)
         ) and sd_supported
         if not hd_enabled and not sd_enabled:

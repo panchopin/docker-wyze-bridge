@@ -1,5 +1,15 @@
 # What's Changed
 
+## Planned for v4.2.1
+
+Documentation and bugfix prep for the next patch release. Not released yet.
+
+### Major Changes
+
+- Fix Home Assistant per-camera feed defaults so explicit `CAM_OPTIONS` `HD` and `SD` values apply at runtime even when `/config/wyze_camera_settings.json` is absent.
+- Add focused regression coverage for that precedence rule and validate it live in the dev add-on without a saved runtime settings file.
+- Record the production-safe outcome: production restored with the intended `SD`-only camera defaults after validation.
+
 ## What's Changed in v4.1.1
 
 Patch release focused on the shared native `go2rtc` runtime path and clearer native camera behavior.

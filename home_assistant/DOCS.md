@@ -90,6 +90,7 @@ Available options:
 
 - `HD` enables the higher-quality feed for that camera.
 - `SD` enables the lower-bandwidth feed for that camera.
+- Explicit `HD` and `SD` values in `CAM_OPTIONS` act as the default runtime feed state even before any camera settings are saved from the Web UI.
 - `HD_KBPS` and `SD_KBPS` set per-feed bitrate targets.
 - `AUDIO` enables audio for that camera.
 - `STREAM` is the older `main` / `both` / `sub` shortcut. Prefer `HD` and `SD` for new setups.
