@@ -263,14 +263,32 @@
                                         <i class="fas fa-circle-pause" aria-hidden="true"></i></span>
                                      <span>Stop</span></button>
                              </div>
-                             {% if not camera.substream %}
-                             <p class="menu-label dropdown-item"><i class="fas fa-code-branch"></i> Stream Mode</p>
-                             <div class="buttons are-small is-centered stream-mode-group" data-cam="{{cam_uri}}">
-                                 <button class="button stream-mode-button" type="button" data-mode="main" title="Pull only the main stream">Main</button>
-                                 <button class="button stream-mode-button" type="button" data-mode="both" title="Pull both main and sub streams">Both</button>
-                                 <button class="button stream-mode-button {% if not camera.bridge_can_substream %}is-static{% endif %}" type="button" data-mode="sub" {% if not camera.bridge_can_substream %}disabled title="Sub stream is not available for this camera"{% else %}title="Pull only the sub stream"{% endif %}>Sub</button>
+                             {% set feed_config_cam = camera.camera_uri or cam_uri %}
+                             {% set show_feed_controls = (not camera.substream) or (camera.camera_uri not in cam_data.cameras) %}
+                             {% if show_feed_controls %}
+                             <p class="menu-label dropdown-item"><i class="fas fa-code-branch"></i> Feed Selection</p>
+                             <div class="dropdown-item stream-config-group" data-cam="{{feed_config_cam}}">
+                                 <div class="buttons are-small is-centered mb-2">
+                                     <button class="button stream-feed-button" type="button" data-feed="hd" {% if camera.product_model == 'HL_BC' %}disabled title="HD stream is not available for this camera"{% else %}title="Publish the HD feed"{% endif %}>HD</button>
+                                     <button class="button stream-feed-button" type="button" data-feed="sd" title="Publish the SD feed">SD</button>
+                                 </div>
+                                 <div class="field is-grouped is-grouped-centered mb-2">
+                                     <div class="control has-text-centered">
+                                         <label class="label is-size-7 mb-1">HD kbps</label>
+                                         <input class="input is-small stream-kbps-input" type="number" min="1" step="1" data-feed="hd" placeholder="180">
+                                         <p class="help is-size-7 stream-feed-meta" data-feed-meta="hd"></p>
+                                     </div>
+                                     <div class="control has-text-centered">
+                                         <label class="label is-size-7 mb-1">SD kbps</label>
+                                         <input class="input is-small stream-kbps-input" type="number" min="1" step="1" data-feed="sd" placeholder="30">
+                                         <p class="help is-size-7 stream-feed-meta" data-feed-meta="sd"></p>
+                                     </div>
+                                 </div>
+                                 <div class="buttons are-small is-centered">
+                                     <button class="button is-primary stream-config-save" type="button">Apply</button>
+                                 </div>
                              </div>
-                             <p class="dropdown-item has-text-grey-light is-size-7">Main is the default. Sub and Both are only available on cameras that expose a supported secondary stream.</p>
+                             <p class="dropdown-item has-text-grey-light is-size-7">Enable the feed levels you actually want to publish. Unsupported HD or SD options stay disabled, and the labels show the current feed path and reported resolution.</p>
                              {% endif %}
                         </div>
                     </div>

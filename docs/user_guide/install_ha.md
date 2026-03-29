@@ -38,11 +38,11 @@ The sidecar API on `:11984` exists internally but is not part of the stable publ
 
 ## Camera Notes
 
-The add-on supports the broader Wyze lineup, but the `4.1` release now publishes model-specific limits more explicitly:
+The add-on supports the broader Wyze lineup, but the `4.2` release now publishes model-specific limits more explicitly:
 
 - `V3`: validated V3-class bridge paths have reached `1920x1080`, with firmware-gated substream support.
 - `V3 Pro`: validated main stream reached `2560x1440`.
-- `V4`: Home Assistant native `go2rtc` is the best documented RTSP path in `4.1`, with validated native output at `2560x1440` main and `640x360` substream.
+- `V4`: Home Assistant native `go2rtc` is the best documented RTSP path in `4.2`, with validated native output at `2560x1440` main and `640x360` substream.
 - `Wyze Bulb Cam`: supported, but current public validation keeps both main and `-sd` at `640x360`.
 
 See [Camera Support](./camera_support.md) for the full matrix.

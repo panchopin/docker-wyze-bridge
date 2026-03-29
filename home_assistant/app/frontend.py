@@ -374,6 +374,7 @@ def create_app():
             return cam | web_ui.format_stream(cam_name)
         return {"error": f"Could not find camera [{cam_name}]"}
 
+    @app.route("/api/<string:cam_name>/stream-config", methods=["GET", "PUT", "POST"])
     @app.route("/api/<string:cam_name>/stream-mode", methods=["GET", "PUT", "POST"])
     @auth_required
     def api_cam_stream_mode(cam_name: str):
@@ -382,38 +383,28 @@ def create_app():
             return {"status": "error", "response": f"Camera [{cam_name}] not found"}, 404
 
         if request.method == "GET":
-            mode = wb.camera_stream_mode(camera) or (
-                "both" if wb.camera_substream_enabled(camera) else "main"
-            )
-            return {
-                "status": "success",
-                "camera": camera.name_uri,
-                "mode": mode,
-                "supports_substream": bool(camera.bridge_can_substream),
-            }
+            config = wb.camera_stream_config(camera)
+            return {"status": "success", "camera": camera.name_uri} | config
 
         payload = request.get_json(silent=True) or {}
-        mode = str(
-            payload.get("mode") or request.values.get("mode") or request.args.get("mode") or ""
-        ).strip().lower()
-        if mode == "sub" and not camera.bridge_can_substream:
-            return {
-                "status": "error",
-                "response": "Sub stream is not available for this camera",
-            }, 409
-
         try:
-            saved_mode = set_camera_stream_mode(camera.name_uri, mode)
-        except ValueError:
-            return {"status": "error", "response": "Invalid stream mode"}, 400
+            if ({"hd_enabled", "sd_enabled", "hd_kbps", "sd_kbps"} & set(payload)):
+                config = wb.apply_camera_stream_config(camera, payload)
+            elif "mode" in payload:
+                mode = str(
+                    payload.get("mode") or request.values.get("mode") or request.args.get("mode") or ""
+                ).strip().lower()
+                saved_mode = set_camera_stream_mode(camera.name_uri, mode)
+                config = wb.camera_stream_config(camera)
+                config["mode"] = saved_mode
+            else:
+                config = wb.camera_stream_config(camera)
+        except ValueError as ex:
+            message = str(ex) or "Invalid stream configuration"
+            return {"status": "error", "response": message}, 409 if "not available" in message else 400
 
         wb.refresh_cams()
-        return {
-            "status": "success",
-            "camera": camera.name_uri,
-            "mode": saved_mode,
-            "supports_substream": bool(camera.bridge_can_substream),
-        }
+        return {"status": "success", "camera": camera.name_uri} | config
 
     @app.route("/api/<string:cam_name>/talkback", methods=["POST"])
     @auth_required
@@ -599,103 +590,6 @@ def create_app():
         )
         resp.headers.set("content-type", "application/x-mpegURL")
         return resp
-
-    @app.route("/network-test", methods=["GET"])
-    @auth_required
-    def network_test():
-        """
-        Execute network connectivity tests for HL_BC camera.
-        Returns results of ping, port scan, and connectivity checks.
-        """
-        import subprocess
-        import time
-        
-        camera_ip = "192.168.1.244"
-        results = {
-            "camera_ip": camera_ip,
-            "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
-            "tests": {}
-        }
-        
-        # Test 1: Ping
-        try:
-            ping_result = subprocess.run(
-                ['ping', '-c', '2', '-W', '2', camera_ip],
-                capture_output=True, text=True, timeout=10
-            )
-            results["tests"]["ping"] = {
-                "reachable": ping_result.returncode == 0,
-                "output": ping_result.stdout if ping_result.returncode == 0 else ping_result.stderr[:200]
-            }
-        except Exception as e:
-            results["tests"]["ping"] = {"error": str(e)}
-        
-        # Test 2: Port scan using nc (netcat)
-        ports_to_test = {
-            80: "HTTP", 443: "HTTPS", 554: "RTSP-Alt", 8554: "RTSP", 
-            1935: "RTMP", 8080: "HTTP-Alt", 8443: "HTTPS-Alt", 
-            8888: "WebRTC", 9999: "Debug", 22: "SSH", 23: "Telnet"
-        }
-        
-        port_results = {}
-        for port, service in ports_to_test.items():
-            try:
-                # Use bash to test if port is open
-                cmd = f"timeout 2 bash -c 'echo >/dev/tcp/{camera_ip}/{port}' 2>&1"
-                port_test = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=3)
-                is_open = port_test.returncode == 0 and not port_test.stderr
-                port_results[port] = {
-                    "service": service,
-                    "open": is_open
-                }
-            except Exception as e:
-                port_results[port] = {"service": service, "open": False, "error": str(e)}
-        
-        results["tests"]["ports"] = port_results
-        open_ports = [p for p, info in port_results.items() if info.get("open")]
-        results["tests"]["open_port_count"] = len(open_ports)
-        results["tests"]["open_port_list"] = open_ports
-        
-        # Test 3: Check what tools are available
-        tools = {}
-        for tool in ['nmap', 'tcpdump', 'tshark', 'nc', 'netcat']:
-            try:
-                tool_check = subprocess.run(['which', tool], capture_output=True, text=True, timeout=2)
-                tools[tool] = tool_check.returncode == 0
-            except:
-                tools[tool] = False
-        results["tests"]["available_tools"] = tools
-        
-        # Test 4: Check if we can get camera info via bridge
-        cam_info = {}
-        try:
-            if hasattr(wb, 'api') and wb.api:
-                cam_list = wb.api.cameras
-                if cam_list:
-                    for cam in cam_list:
-                        if cam.nickname and 'south' in cam.nickname.lower():
-                            cam_info = {
-                                "nickname": cam.nickname,
-                                "model": cam.product_model,
-                                "mac": cam.mac,
-                                "ip": cam.ip,
-                                "firmware": getattr(cam, 'firmware_ver', 'unknown'),
-                            }
-                            break
-        except Exception as e:
-            cam_info = {"error": str(e)}
-        results["tests"]["camera_info"] = cam_info
-        
-        # Summary
-        results["summary"] = {
-            "ping_reachable": results["tests"]["ping"].get("reachable", False),
-            "open_ports_found": len(open_ports),
-            "debug_ports_found": [p for p in open_ports if p in [9999, 22, 23, 2323]],
-            "tools_available": sum(1 for v in tools.values() if v),
-            "recommendation": "Run full port scan with nmap" if not tools['nmap'] else "Run detailed testing"
-        }
-        
-        return results
 
     return app
 

@@ -35,7 +35,7 @@ This guide covers common issues for Docker Wyze Bridge.
 ### Main and substream look identical
 
 - A `-sub` alias can exist without exposing a truly different stream profile.
-- This is a known `4.1` limitation for some newer cameras, especially when Wyze firmware only exposes one effective KVS/WebRTC profile.
+- This is a known `4.2` limitation for some newer cameras, especially when Wyze firmware only exposes one effective KVS/WebRTC profile.
 
 ## Model-Specific Notes
 
@@ -46,19 +46,19 @@ This guide covers common issues for Docker Wyze Bridge.
 
 ### Wyze Cam V3 Pro
 
-- Public `4.1` validation reached `2560x1440` main-stream output.
-- `4.1` does not promise a fixed public substream ceiling on every host.
+- Public `4.2` validation reached `2560x1440` main-stream output.
+- `4.2` does not promise a fixed public substream ceiling on every host.
 
 ### Wyze Cam V4
 
 - Standard bridge RTSP can still remain `640x360`.
-- The best documented RTSP path in `4.1` is the Home Assistant native sidecar on `:19554`.
+- The best documented RTSP path in `4.2` is the Home Assistant native sidecar on `:19554`.
 - TUTK fallback is not documented as a reliable quality-rescue path.
 
 ### Wyze Bulb Cam
 
-- Supported, but current public `4.1` validation keeps both main and `-sd` feeds at `640x360`.
-- If you need a guaranteed higher RTSP ceiling, `4.1` does not currently provide one for this model.
+- Supported, but current public `4.2` validation keeps both main and `-sd` feeds at `640x360`.
+- If you need a guaranteed higher RTSP ceiling, `4.2` does not currently provide one for this model.
 
 ## Debugging
 

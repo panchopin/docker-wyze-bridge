@@ -8,6 +8,9 @@
 - [completed] Apply minimal branch protection on `main` to block force-pushes and deletions without breaking direct CI-driven version bumps.
 - [completed] Prepare the public `4.1.0` release surfaces: generic app naming, model-specific support matrix, Home Assistant native sidecar docs, and attribution cleanup.
 - [in_progress] Diagnose the Home Assistant local OnStar MFA redirect failure after TOTP by instrumenting the patched local add-on, rebuilding it safely, and validating the real post-submit browser flow without touching production.
+- [completed] Normalize the shared `frontend.py`, `site.js`, and `index.html` runtime surfaces for the local `4.2` branch while preserving intentional environment-specific port differences.
+- [completed] Prepare the `4.2.0` release surfaces with aligned docs, manifests, env files, and packaging expectations.
+- [completed] Run focused `4.2` validation for frontend, stream-config, talkback, and Home Assistant packaging after the final normalization pass.
 - [completed] Convert `.ha_live_addon` into a distinct Home Assistant `Dev Build` add-on with its own slug for staging.
 - [completed] Add SSH staging helpers for syncing the dev add-on, copying production settings, and swapping prod/dev safely.
 - [completed] Add local-only maintainer docs for the Home Assistant dev-build lane, smoke checks, troubleshooting, and promotion.

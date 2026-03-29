@@ -61,14 +61,14 @@ function applyPreferences() {
       }
     });
     grid[i].classList.add(
-      `is-${repeatNumber == 5 ? "one-fifth" : 12 / repeatNumber}`
+      `is-${repeatNumber == 5 ? "one-fifth" : 12 / repeatNumber}`,
     );
   }
   var sortOrder = getCookie("camera_order", "");
   if (sortOrder) {
     // clean escaped camera_order from flask args
     if (sortOrder.includes("%2C")) {
-      sortOrder = sortOrder.replaceAll("%2C", ",")
+      sortOrder = sortOrder.replaceAll("%2C", ",");
       setCookie("camera_order", sortOrder);
     }
     const ids = sortOrder.split(",");
@@ -212,7 +212,8 @@ async function update_img(oldUrl, options = {}) {
     });
 
   // update video.poster
-  document.querySelectorAll(`[poster="${oldUrl}"],[poster="${newUrl}"]`)
+  document
+    .querySelectorAll(`[poster="${oldUrl}"],[poster="${newUrl}"]`)
     .forEach(function (e) {
       e.setAttribute("poster", newUrl);
     });
@@ -222,7 +223,9 @@ async function update_img(oldUrl, options = {}) {
     button.getElementsByClassName("fas")[0].classList.remove("fa-spin");
     button.style.display = null;
     if (!imgDate.url.endsWith(".svg")) {
-      button.parentElement.querySelector(".age").dataset.age = new Date(imgDate.headers.get("Last-Modified")).getTime();
+      button.parentElement.querySelector(".age").dataset.age = new Date(
+        imgDate.headers.get("Last-Modified"),
+      ).getTime();
     }
   }
   return newUrl;
@@ -231,8 +234,13 @@ async function update_img(oldUrl, options = {}) {
 function refresh_imgs() {
   document.querySelectorAll(".refresh_img").forEach(async function (image) {
     let url = image.getAttribute(image.nodeName === "IMG" ? "src" : "poster");
-    if (url === null) { return; }
-    let CameraBattery = document.getElementById(image.dataset.cam).dataset.battery?.toLowerCase() == "true";
+    if (url === null) {
+      return;
+    }
+    let CameraBattery =
+      document
+        .getElementById(image.dataset.cam)
+        .dataset.battery?.toLowerCase() == "true";
     let CameraConnected = image.classList.contains("connected");
     let CameraEnabled = image.classList.contains("enabled");
     await update_img(url, {
@@ -251,14 +259,18 @@ document.addEventListener("DOMContentLoaded", () => {
     const newOrdering = ids.join(",");
     console.debug("New camera_order", newOrdering);
     setCookie("camera_order", newOrdering);
-    updateQueryParam("order", newOrdering)
+    updateQueryParam("order", newOrdering);
   });
 });
 
 function updateQueryParam(paramName, paramValue) {
   let url = new URL(window.location.href);
   url.searchParams.set(paramName, paramValue);
-  window.history.replaceState(null, null, url.toString().replaceAll("%2C", ","));
+  window.history.replaceState(
+    null,
+    null,
+    url.toString().replaceAll("%2C", ","),
+  );
 }
 document.addEventListener("DOMContentLoaded", () => {
   // Filter cameras
@@ -289,40 +301,135 @@ document.addEventListener("DOMContentLoaded", () => {
       document.getElementById("refresh-menu").classList.toggle("is-active");
     });
 
+  async function copyToClipboard(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch (_) {
+        // fall back to legacy method
+      }
+    }
+    const helper = document.createElement("textarea");
+    helper.value = text;
+    helper.style.position = "fixed";
+    helper.style.left = "-9999px";
+    helper.setAttribute("aria-hidden", "true");
+    document.body.appendChild(helper);
+    helper.focus();
+    helper.select();
+    const copied = document.execCommand("copy");
+    document.body.removeChild(helper);
+    return copied;
+  }
+
+  function getStreamAuthHeader(url) {
+    let username = "";
+    let password = "";
+    try {
+      const parsedUrl = new URL(url, window.location.origin);
+      username = parsedUrl.username || "";
+      password = parsedUrl.password || "";
+    } catch (_) {
+      // ignore URL parsing issues and fall back to configured auth
+    }
+    if (!username || !password) {
+      username = window.WB_STREAM_AUTH?.username || "";
+      password = window.WB_STREAM_AUTH?.password || "";
+    }
+    if (!username || !password) {
+      return null;
+    }
+    return `Basic ${btoa(`${username}:${password}`)}`;
+  }
+
+  document
+    .querySelectorAll(".copy-stream-url[data-copy-text]")
+    .forEach((button) => {
+      button.addEventListener("click", async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const copyText = button.dataset.copyText;
+        const label = button.dataset.copyLabel || "Stream URL";
+        if (!copyText) {
+          sendNotification("Copy failed", `${label} is empty`, "danger");
+          return;
+        }
+        try {
+          const copied = await copyToClipboard(copyText);
+          if (!copied) {
+            throw new Error("Clipboard denied");
+          }
+          sendNotification("Copied", `${label} copied`, "success");
+        } catch (error) {
+          sendNotification(
+            "Copy failed",
+            "Copy your stream URL manually:",
+            "warning",
+          );
+          window.prompt(`${label} (copy manually)`, copyText);
+        }
+      });
+    });
+
   // Check for version update
   const checkAPI = document.getElementById("checkUpdate");
   checkAPI.addEventListener("click", () => {
     let icon = checkAPI.getElementsByClassName("fa-arrows-rotate")[0].classList;
     icon.add("fa-spin");
-    fetch("https://api.github.com/repos/thatdaveguy1/docker-wyze-bridge/releases/latest")
+    fetch(
+      "https://api.github.com/repos/thatdaveguy1/docker-wyze-bridge/releases/latest",
+    )
       .then((response) => response.json())
       .then((data) => {
         let apiVersion = data.tag_name.replace(/[^0-9\.]/g, "");
-        if (apiVersion.localeCompare(checkAPI.dataset.version, undefined, { numeric: true }) === 1) {
-          sendNotification('Update available!', `🎉 v${apiVersion}`, "warning");
+        if (
+          apiVersion.localeCompare(checkAPI.dataset.version, undefined, {
+            numeric: true,
+          }) === 1
+        ) {
+          sendNotification("Update available!", `🎉 v${apiVersion}`, "warning");
         } else {
-          sendNotification('All up to date!', '✅ Running the latest version!', "success");
+          sendNotification(
+            "All up to date!",
+            "✅ Running the latest version!",
+            "success",
+          );
         }
       })
-      .catch((error) => { sendNotification('Update check failed', error.message, "danger") })
-      .finally(() => { icon.remove("fa-spin"); });
+      .catch((error) => {
+        sendNotification("Update check failed", error.message, "danger");
+      })
+      .finally(() => {
+        icon.remove("fa-spin");
+      });
   });
 
   // Update preview after loading the page
   async function loadPreview(img) {
     let cam = img.getAttribute("data-cam");
     var oldUrl = img.getAttribute("src");
-    const refreshMode = img.dataset.refreshMode || img.closest(".camera")?.dataset.previewRefreshMode || "snapshot";
+    const refreshMode =
+      img.dataset.refreshMode ||
+      img.closest(".camera")?.dataset.previewRefreshMode ||
+      "snapshot";
     if (oldUrl == null || !oldUrl.includes(cam)) {
-      oldUrl = img.closest(".camera")?.dataset.previewUrl || `snapshot/${cam}.jpg`;
+      oldUrl =
+        img.closest(".camera")?.dataset.previewUrl || `snapshot/${cam}.jpg`;
     }
     try {
       let newUrl = await update_img(oldUrl, {
         refreshMode: refreshMode,
-        useImg: refreshMode !== "thumb" && (getCookie("refresh_period") <= 10 || !img.classList.contains("enabled")),
+        useImg:
+          refreshMode !== "thumb" &&
+          (getCookie("refresh_period") <= 10 ||
+            !img.classList.contains("enabled")),
       });
       let newVal = newUrl;
-      img.parentElement.querySelectorAll("[src$=loading\\.svg],[style*=loading\\.svg],[poster$=loading\\.svg]")
+      img.parentElement
+        .querySelectorAll(
+          "[src$=loading\\.svg],[style*=loading\\.svg],[poster$=loading\\.svg]",
+        )
         .forEach((e) => {
           for (let attr of e.attributes) {
             if (attr.value.includes("loading.svg")) {
@@ -346,7 +453,9 @@ document.addEventListener("DOMContentLoaded", () => {
   // click to update preview
   document.querySelectorAll(".update-preview[data-cam]").forEach((button) => {
     button.addEventListener("click", async () => {
-      let img = document.querySelector(`.refresh_img[data-cam=${button.getAttribute("data-cam")}]`);
+      let img = document.querySelector(
+        `.refresh_img[data-cam=${button.getAttribute("data-cam")}]`,
+      );
       let imgSrc = img.getAttribute(img.nodeName === "IMG" ? "src" : "poster");
       if (img && imgSrc) {
         await update_img(imgSrc, { refreshMode: img.dataset.refreshMode });
@@ -362,8 +471,20 @@ document.addEventListener("DOMContentLoaded", () => {
       a.classList.add("has-text-danger");
       fetch("restart/" + a.dataset.restart)
         .then((resp) => resp.json())
-        .then((data) => { sendNotification(`Restart ${a.dataset.restart}`, data.result, "warning"); })
-        .catch((error) => { sendNotification(`Restart ${a.dataset.restart}`, error.message, "danger"); });
+        .then((data) => {
+          sendNotification(
+            `Restart ${a.dataset.restart}`,
+            data.result,
+            "warning",
+          );
+        })
+        .catch((error) => {
+          sendNotification(
+            `Restart ${a.dataset.restart}`,
+            error.message,
+            "danger",
+          );
+        });
       setTimeout(() => {
         a.style = null;
         a.classList.remove("has-text-danger");
@@ -372,47 +493,58 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   // Update status icon based on connection status
-  const sse = new EventSource("api/sse_status");
-  sse.addEventListener("open", () => {
+  let statusPoll = null;
+
+  function onStatusOpen() {
     document.getElementById("connection-lost").style.display = "none";
     document.querySelectorAll(".cam-overlay button.offline").forEach((btn) => {
       btn.disabled = false;
       btn.classList.remove("offline");
-      let icon = btn.getElementsByClassName("fas")[0]
+      let icon = btn.getElementsByClassName("fas")[0];
       icon.classList.remove("fa-plug-circle-exclamation");
       icon.classList.add("fa-arrows-rotate");
-    })
+    });
     autoplay();
     applyPreferences();
-  });
-  sse.addEventListener("error", () => {
+  }
+
+  function onStatusError() {
     refresh_period = -1;
     clearInterval(refresh_interval);
     document.getElementById("connection-lost").style.display = "block";
     autoplay("stop");
-    document.querySelectorAll("img.refresh_img,video[data-cam='${cam}']").forEach((i) => { i.classList.remove("connected", "enabled") })
+    document
+      .querySelectorAll("img.refresh_img,video[data-cam='${cam}']")
+      .forEach((i) => {
+        i.classList.remove("connected", "enabled");
+      });
     document.querySelectorAll(".cam-overlay").forEach((i) => {
       i.getElementsByClassName("fas")[0].classList.remove("fa-spin");
-    })
-    document.querySelectorAll("[data-enabled=True] .card-header-title .status i").forEach((i) => {
-      i.setAttribute("class", "fas fa-circle-exclamation")
     });
+    document
+      .querySelectorAll("[data-enabled=True] .card-header-title .status i")
+      .forEach((i) => {
+        i.setAttribute("class", "fas fa-circle-exclamation");
+      });
     document.querySelectorAll(".cam-overlay button").forEach((btn) => {
       btn.disabled = true;
       btn.parentElement.style.display = null;
       btn.classList.add("offline");
-      let icon = btn.getElementsByClassName("fas")[0]
+      let icon = btn.getElementsByClassName("fas")[0];
       icon.classList.remove("fa-arrows-rotate", "fa-spin");
       icon.classList.add("fa-plug-circle-exclamation");
-    })
-  });
-  sse.addEventListener("message", (event) => {
-    const data = JSON.parse(event.data);
+    });
+  }
+
+  function applyStatusData(data) {
+    onStatusOpen();
 
     for (const [cam, messageData] of Object.entries(data)) {
       const card = document.getElementById(cam);
       const statusIcon = card.querySelector(".status i.fas");
-      const preview = card.querySelector(`img.refresh_img, video[data-cam='${cam}']`);
+      const preview = card.querySelector(
+        `img.refresh_img, video[data-cam='${cam}']`,
+      );
       const motionIcon = card.querySelector(".icon.motion");
       const connected = card.dataset.connected.toLowerCase() === "true";
       updateBatteryLevel(card);
@@ -422,13 +554,16 @@ document.addEventListener("DOMContentLoaded", () => {
       statusIcon.parentElement.title = "";
 
       if (preview) {
-        preview.classList.toggle("connected", messageData.status === "connected");
+        preview.classList.toggle(
+          "connected",
+          messageData.status === "connected",
+        );
         preview.classList.toggle("enabled", messageData.status !== "disabled");
       }
 
       if (messageData.motion) {
         motionIcon.classList.remove("is-hidden");
-        sendNotification('Motion', `Motion detected on ${cam}`, "info");
+        sendNotification("Motion", `Motion detected on ${cam}`, "info");
       } else {
         motionIcon.classList.add("is-hidden");
       }
@@ -436,20 +571,25 @@ document.addEventListener("DOMContentLoaded", () => {
       switch (messageData.status) {
         case "connected":
           if (!connected) {
-            sendNotification('Connected', `Connected to ${cam}`, "success");
+            sendNotification("Connected", `Connected to ${cam}`, "success");
           }
           card.dataset.connected = true;
           statusIcon.classList.add("fa-circle-play", "has-text-success");
           statusIcon.parentElement.title = "Click/tap to pause";
           autoplay();
 
-          const noPreview = card.querySelector('.no-preview');
+          const noPreview = card.querySelector(".no-preview");
           if (noPreview) {
             const fig = noPreview.parentElement;
             const newPreview = document.createElement("img");
-            newPreview.classList.add("refresh_img", "loading-preview", "connected");
+            newPreview.classList.add(
+              "refresh_img",
+              "loading-preview",
+              "connected",
+            );
             newPreview.dataset.cam = cam;
-            newPreview.dataset.refreshMode = card.dataset.previewRefreshMode || "snapshot";
+            newPreview.dataset.refreshMode =
+              card.dataset.previewRefreshMode || "snapshot";
             newPreview.src = "static/loading.svg";
             fig.replaceChild(newPreview, noPreview);
             loadPreview(fig.querySelector("img"));
@@ -463,7 +603,11 @@ document.addEventListener("DOMContentLoaded", () => {
 
         case "stopped":
           if (connected) {
-            sendNotification('Disconnected', `Disconnected from ${cam}`, "danger");
+            sendNotification(
+              "Disconnected",
+              `Disconnected from ${cam}`,
+              "danger",
+            );
           }
           statusIcon.classList.add("fa-circle-pause");
           statusIcon.parentElement.title = "Click/tap to play";
@@ -471,7 +615,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
         case "offline":
           if (connected) {
-            sendNotification('Offline', `${cam} is offline`, "danger");
+            sendNotification("Offline", `${cam} is offline`, "danger");
           }
           statusIcon.classList.add("fa-ghost");
           statusIcon.parentElement.title = "Camera offline";
@@ -479,22 +623,42 @@ document.addEventListener("DOMContentLoaded", () => {
 
         default:
           if (connected) {
-            sendNotification('Disconnected', `Disconnected from ${cam}`, "danger");
+            sendNotification(
+              "Disconnected",
+              `Disconnected from ${cam}`,
+              "danger",
+            );
           }
           statusIcon.className = "fas fa-circle-exclamation";
           statusIcon.parentElement.title = "Not Connected";
           break;
       }
     }
-  });
+  }
+
+  async function pollStatus() {
+    try {
+      const response = await fetch("api/status", { cache: "no-store" });
+      if (!response.ok) {
+        throw new Error(`status ${response.status}`);
+      }
+      applyStatusData(await response.json());
+    } catch {
+      onStatusError();
+    }
+  }
+
+  pollStatus();
+  clearInterval(statusPoll);
+  statusPoll = setInterval(pollStatus, 5000);
 
   // Toggle Camera details
   function toggleDetails() {
-    const cam = this.getAttribute("data-cam")
+    const cam = this.getAttribute("data-cam");
     const card = document.getElementById(cam);
-    const img = card.getElementsByClassName("card-image")[0]
-    const content = card.getElementsByClassName("content")[0]
-    let icon = this.getElementsByClassName("fas")[0].classList
+    const img = card.getElementsByClassName("card-image")[0];
+    const content = card.getElementsByClassName("content")[0];
+    let icon = this.getElementsByClassName("fas")[0].classList;
     if (icon.contains("fa-circle-info")) {
       icon.remove("fa-circle-info");
       icon.add("fa-circle-xmark");
@@ -503,35 +667,46 @@ document.addEventListener("DOMContentLoaded", () => {
       icon.add("fa-circle-info");
     }
     if (content.classList.contains("is-hidden")) {
-      const table = content.getElementsByTagName("table")[0]
-      fetch(`api/${cam}`).then(resp => resp.json()).then(data => {
-        table.innerHTML = ""
-        for (const [key, value] of Object.entries(data)) {
-          if (key == "camera_info" && value != null) {
-            for (const [k, v] of Object.entries(value)) {
-              let newRow = table.insertRow();
-              let keyCell = newRow.insertCell(0)
-              let valCell = newRow.insertCell(1)
-              keyCell.innerHTML = k
-              valCell.innerHTML = "<code>" + JSON.stringify(v, null, 2) + "</code>"
+      const table = content.getElementsByTagName("table")[0];
+      fetch(`api/${cam}`)
+        .then((resp) => resp.json())
+        .then((data) => {
+          table.innerHTML = "";
+          for (const [key, value] of Object.entries(data)) {
+            if (key == "camera_info" && value != null) {
+              for (const [k, v] of Object.entries(value)) {
+                let newRow = table.insertRow();
+                let keyCell = newRow.insertCell(0);
+                let valCell = newRow.insertCell(1);
+                keyCell.innerHTML = k;
+                valCell.innerHTML =
+                  "<code>" + JSON.stringify(v, null, 2) + "</code>";
+              }
+              continue;
             }
-            continue;
+            let newRow = table.insertRow();
+            let keyCell = newRow.insertCell(0);
+            let valCell = newRow.insertCell(1);
+            keyCell.innerHTML = key;
+            if (
+              typeof value === "string" &&
+              (key.endsWith("_url") || key == "thumbnail")
+            ) {
+              let link = document.createElement("a");
+              link.href = value;
+              link.title = value;
+              link.innerHTML =
+                value.substring(0, Math.min(40, value.length)) +
+                (value.length >= 40 ? "..." : "");
+              valCell.appendChild(link);
+            } else {
+              valCell.innerHTML = "<code>" + value + "</code>";
+            }
           }
-          let newRow = table.insertRow();
-          let keyCell = newRow.insertCell(0)
-          let valCell = newRow.insertCell(1)
-          keyCell.innerHTML = key
-          if (typeof value === 'string' && (key.endsWith("_url") || key == 'thumbnail')) {
-            let link = document.createElement('a');
-            link.href = value;
-            link.title = value;
-            link.innerHTML = value.substring(0, Math.min(40, value.length)) + (value.length >= 40 ? "..." : "");
-            valCell.appendChild(link)
-          } else {
-            valCell.innerHTML = "<code>" + value + "</code>"
-          }
-        }
-      }).catch(error => { console.error(error); });
+        })
+        .catch((error) => {
+          console.error(error);
+        });
     }
     img.classList.toggle("is-hidden");
     content.classList.toggle("is-hidden");
@@ -541,16 +716,16 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   // Play/pause on-demand
   function clickDemand() {
-    const icon = this.querySelector("i.fas")
+    const icon = this.querySelector("i.fas");
     const uri = this.getAttribute("data-cam");
     if (icon.matches(".fa-circle-play, .fa-satellite-dish")) {
-      icon.setAttribute("class", "fas fa-circle-notch fa-spin")
-      fetch(`api/${uri}/state/stop`)
-      console.debug("pause " + uri)
+      icon.setAttribute("class", "fas fa-circle-notch fa-spin");
+      fetch(`api/${uri}/state/stop`);
+      console.debug("pause " + uri);
     } else if (icon.matches(".fa-circle-pause, .fa-ghost")) {
-      icon.setAttribute("class", "fas fa-circle-notch fa-spin")
-      fetch(`api/${uri}/state/start`)
-      console.debug("play " + uri)
+      icon.setAttribute("class", "fas fa-circle-notch fa-spin");
+      fetch(`api/${uri}/state/start`);
+      console.debug("play " + uri);
     }
   }
   document.querySelectorAll(".status.enabled").forEach((span) => {
@@ -560,18 +735,26 @@ document.addEventListener("DOMContentLoaded", () => {
   // Preview age
   function imgAge() {
     document.querySelectorAll("span.age[data-age]").forEach((span) => {
-      timestamp = parseInt(span.dataset.age)
+      timestamp = parseInt(span.dataset.age);
       if (timestamp) {
         var created = new Date(timestamp).getTime(),
           s = Math.floor((new Date() - created) / 1000),
-          age = s < 60 ? `${s}s` : s < 3600 ? `+${Math.floor(s / 60)}m` : s < 86400 ? `+${Math.floor(s / 3600)}h` : `+${Math.floor(s / 86400)}d`
-        span.textContent = age
+          age =
+            s < 60
+              ? `${s}s`
+              : s < 3600
+                ? `+${Math.floor(s / 60)}m`
+                : s < 86400
+                  ? `+${Math.floor(s / 3600)}h`
+                  : `+${Math.floor(s / 86400)}d`;
+        span.textContent = age;
       }
-    })
+    });
     setTimeout(imgAge, 1000);
   }
-  if (!getCookie("show_video")) { imgAge() }
-
+  if (!getCookie("show_video")) {
+    imgAge();
+  }
 
   // fullscreen mode
   function toggleFullscreen(fs) {
@@ -579,41 +762,27 @@ document.addEventListener("DOMContentLoaded", () => {
       fs = getCookie("fullscreen");
     }
     let icon = document.querySelector(".fullscreen .fas");
-    icon.classList.remove("fa-maximize", "fa-minimize")
-    icon.classList.add(fs ? "fa-minimize" : "fa-maximize")
+    icon.classList.remove("fa-maximize", "fa-minimize");
+    icon.classList.add(fs ? "fa-minimize" : "fa-maximize");
     document.querySelector(".section").style.padding = fs ? "1.5rem" : "";
     document.querySelectorAll(".fs-display-none").forEach((e) => {
-      if (fs) { e.classList.add("fs-mode") } else { e.classList.remove("fs-mode") }
-    })
-    if (fs) { autoplay(); }
+      if (fs) {
+        e.classList.add("fs-mode");
+      } else {
+        e.classList.remove("fs-mode");
+      }
+    });
+    if (fs) {
+      autoplay();
+    }
   }
 
   document.querySelector(".fullscreen button").addEventListener("click", () => {
     let fs = getCookie("fullscreen", false) ? "" : "1";
-    setCookie("fullscreen", fs)
-    toggleFullscreen(fs)
-  })
-  toggleFullscreen()
-
-  function getStreamAuthHeader(url) {
-    let username = "";
-    let password = "";
-    try {
-      const parsedUrl = new URL(url, window.location.origin);
-      username = parsedUrl.username || "";
-      password = parsedUrl.password || "";
-    } catch (_) {
-      // ignore URL parsing issues and fall back to configured auth
-    }
-    if (!username || !password) {
-      username = window.WB_STREAM_AUTH?.username || "";
-      password = window.WB_STREAM_AUTH?.password || "";
-    }
-    if (!username || !password) {
-      return null;
-    }
-    return `Basic ${btoa(`${username}:${password}`)}`;
-  }
+    setCookie("fullscreen", fs);
+    toggleFullscreen(fs);
+  });
+  toggleFullscreen();
 
   function loadHLS(videoElement) {
     if (!videoElement.paused && videoElement.hls && videoElement.hls.media) {
@@ -623,7 +792,14 @@ document.addEventListener("DOMContentLoaded", () => {
     videoElement.controls = true;
     videoElement.classList.remove("placeholder");
     if (Hls.isSupported()) {
-      const hlsConfig = { maxLiveSyncPlaybackRate: 1.5, liveDurationInfinity: true, maxBufferHole: 5, nudgeMaxRetry: 20, liveSyncDurationCount: 0, liveMaxLatencyDurationCount: 6 };
+      const hlsConfig = {
+        maxLiveSyncPlaybackRate: 1.5,
+        liveDurationInfinity: true,
+        maxBufferHole: 5,
+        nudgeMaxRetry: 20,
+        liveSyncDurationCount: 0,
+        liveMaxLatencyDurationCount: 6,
+      };
       if (videoElement.hls && !videoElement.hls.destroyed) {
         videoElement.hls.destroy();
       }
@@ -632,13 +808,19 @@ document.addEventListener("DOMContentLoaded", () => {
       videoElement.hls = hls;
       if (authHeader) {
         hls.config.xhrSetup = (xhr) => {
-          xhr.setRequestHeader('Authorization', authHeader);
+          xhr.setRequestHeader("Authorization", authHeader);
         };
       }
       hls.on(Hls.Events.ERROR, (evt, data) => {
-        if (data.type !== Hls.ErrorTypes.NETWORK_ERROR || videoElement.classList.contains("connected")) {
+        if (
+          data.type !== Hls.ErrorTypes.NETWORK_ERROR ||
+          videoElement.classList.contains("connected")
+        ) {
           setTimeout(() => loadHLS(videoElement), 2000);
-        } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR && videoElement.classList.contains("connected")) {
+        } else if (
+          data.type === Hls.ErrorTypes.MEDIA_ERROR &&
+          videoElement.classList.contains("connected")
+        ) {
           console.debug("Media error", data.details);
         }
       });
@@ -646,88 +828,133 @@ document.addEventListener("DOMContentLoaded", () => {
         hls.loadSource(videoSrc);
         videoElement.muted = true;
         videoElement.play().catch((err) => {
-          console.info('play() error:', err);
+          console.info("play() error:", err);
         });
       });
       hls.attachMedia(videoElement);
-    } else if (videoElement.canPlayType('application/vnd.apple.mpegurl')) {
-      console.log("loading mpeg")
+    } else if (videoElement.canPlayType("application/vnd.apple.mpegurl")) {
+      console.log("loading mpeg");
       const authHeader = getStreamAuthHeader(videoSrc);
-      const fetchOptions = authHeader ? { headers: { Authorization: authHeader } } : undefined;
+      const fetchOptions = authHeader
+        ? { headers: { Authorization: authHeader } }
+        : undefined;
       fetch(videoSrc, fetchOptions)
-        .then(() => { videoElement.src = videoSrc; })
-        .catch(() => { loadHLS(videoElement); });
+        .then(() => {
+          videoElement.src = videoSrc;
+        })
+        .catch(() => {
+          loadHLS(videoElement);
+        });
     }
   }
 
-  document.querySelectorAll('video.hls.placeholder').forEach((videoElement) => {
-    videoElement.parentElement.addEventListener("click", () => { videoElement.play() }, { "once": true });
-    videoElement.addEventListener('play', () => {
+  document.querySelectorAll("video.hls.placeholder").forEach((videoElement) => {
+    videoElement.parentElement.addEventListener(
+      "click",
+      () => {
+        videoElement.play();
+      },
+      { once: true },
+    );
+    videoElement.addEventListener("play", () => {
       loadHLS(videoElement);
-      if (!videoElement.classList.contains("connected") && !videoElement.hasAttribute("connecting")) {
-        videoElement.setAttribute('connecting', '');
-        fetch(`api/${videoElement.dataset.cam}/start`).then(() => {
-          videoElement.classList.add("connected");
-          videoElement.removeAttribute('connecting');
-        }).catch((e) => {
-          console.error('Error starting video stream:', e);
-          videoElement.removeAttribute('connecting');
-        });
+      if (
+        !videoElement.classList.contains("connected") &&
+        !videoElement.hasAttribute("connecting")
+      ) {
+        videoElement.setAttribute("connecting", "");
+        fetch(`api/${videoElement.dataset.cam}/start`)
+          .then(() => {
+            videoElement.classList.add("connected");
+            videoElement.removeAttribute("connecting");
+          })
+          .catch((e) => {
+            console.error("Error starting video stream:", e);
+            videoElement.removeAttribute("connecting");
+          });
       }
-      videoElement.setAttribute('autoplay', '');
+      videoElement.setAttribute("autoplay", "");
     });
-    videoElement.addEventListener('pause', () => {
-      videoElement.removeAttribute('autoplay');
+    videoElement.addEventListener("pause", () => {
+      videoElement.removeAttribute("autoplay");
     });
   });
   // Load WS for WebRTC on demand
   function loadWebRTC(video) {
-    if (!video.classList.contains("placeholder")) { return }
+    if (!video.classList.contains("placeholder")) {
+      return;
+    }
     let videoFormat = getCookie("video");
     video.classList.remove("placeholder");
     video.controls = true;
-    fetch(`signaling/${video.dataset.cam}?${videoFormat}`).then((resp) => resp.json()).then((data) => new Receiver(data));
+    fetch(`signaling/${video.dataset.cam}?${videoFormat}`)
+      .then((resp) => resp.json())
+      .then((data) => new Receiver(data));
   }
   // Click to load WebRTC
 
-  document.querySelectorAll('[data-enabled=True] video.webrtc.placeholder').forEach((videoElement) => {
-    videoElement.parentElement.addEventListener("click", () => { videoElement.play() }, { "once": true });
-    videoElement.addEventListener("play", () => { loadWebRTC(videoElement) }, { "once": true });
-    videoElement.addEventListener('pause', () => { videoElement.removeAttribute('autoplay'); });
-  });
+  document
+    .querySelectorAll("[data-enabled=True] video.webrtc.placeholder")
+    .forEach((videoElement) => {
+      videoElement.parentElement.addEventListener(
+        "click",
+        () => {
+          videoElement.play();
+        },
+        { once: true },
+      );
+      videoElement.addEventListener(
+        "play",
+        () => {
+          loadWebRTC(videoElement);
+        },
+        { once: true },
+      );
+      videoElement.addEventListener("pause", () => {
+        videoElement.removeAttribute("autoplay");
+      });
+    });
   // Auto-play video
   function autoplay(action) {
-    let videos = document.querySelectorAll('video');
+    let videos = document.querySelectorAll("video");
     if (action === "stop") {
-      videos.forEach(video => {
-        if (!video.paused) { video.classList.add("resume"); }
+      videos.forEach((video) => {
+        if (!video.paused) {
+          video.classList.add("resume");
+        }
         video.pause();
         video.controls = false;
         video.classList.add("lost");
-        video.removeAttribute('src');
+        video.removeAttribute("src");
         video.load();
       });
       return;
     }
     let autoPlay = getCookie("autoplay");
     let fullscreen = getCookie("fullscreen");
-    videos.forEach(video => {
-      const resume = video.classList.contains("resume")
+    videos.forEach((video) => {
+      const resume = video.classList.contains("resume");
       video.controls = true;
       video.classList.remove("lost");
       video.classList.remove("resume");
-      if (!resume && !autoPlay && !fullscreen && !video.autoplay) { return }
-      if (video.classList.contains("hls")) { loadHLS(video); }
-      if (video.classList.contains("webrtc")) { loadWebRTC(video); }
+      if (!resume && !autoPlay && !fullscreen && !video.autoplay) {
+        return;
+      }
+      if (video.classList.contains("hls")) {
+        loadHLS(video);
+      }
+      if (video.classList.contains("webrtc")) {
+        loadWebRTC(video);
+      }
       video.play().catch((err) => {
-        console.info('play() error:', err);
+        console.info("play() error:", err);
       });
     });
   }
   // Change default video format for WebUI
   document.querySelectorAll(".preview-toggle [data-action]").forEach((e) => {
     e.addEventListener("click", () => {
-      let videoCookie = getCookie("show_video")
+      let videoCookie = getCookie("show_video");
       setCookie("show_video", "1");
       switch (e.dataset.action) {
         case "snapshot":
@@ -737,9 +964,15 @@ document.addEventListener("DOMContentLoaded", () => {
           let icon = e.querySelector("i.fas").classList;
           let playCookie = !!getCookie("autoplay");
           setCookie("autoplay", !playCookie);
-          if (playCookie) { icon.replace("fa-square-check", "fa-square"); return; }
-          icon.replace("fa-square", "fa-square-check")
-          if (videoCookie) { autoplay(); return; }
+          if (playCookie) {
+            icon.replace("fa-square-check", "fa-square");
+            return;
+          }
+          icon.replace("fa-square", "fa-square-check");
+          if (videoCookie) {
+            autoplay();
+            return;
+          }
           break;
         case "webrtc":
         case "hls":
@@ -748,8 +981,8 @@ document.addEventListener("DOMContentLoaded", () => {
           break;
       }
       window.location = window.location.pathname;
-    })
-  })
+    });
+  });
 
   // cam control
   document.querySelectorAll(".cam-control").forEach((e) => {
@@ -757,48 +990,206 @@ document.addEventListener("DOMContentLoaded", () => {
     e.querySelectorAll(".button[data-cmd]").forEach((button) => {
       button.addEventListener("click", () => {
         button.classList.add("is-loading");
-        const { payload } = button.dataset
-        fetch(`api/${cam}/${button.dataset.cmd}${payload ? `/${payload}` : ''}`)
+        const { payload } = button.dataset;
+        fetch(`api/${cam}/${button.dataset.cmd}${payload ? `/${payload}` : ""}`)
           .then((resp) => resp.json())
-          .then((data) => { sendNotification(cam, `${button.dataset.cmd}: ${data.status}`, ["error", false].includes(data.status) ? "danger" : "primary") })
-          .catch((error) => { sendNotification(cam, `${button.dataset.cmd}: ${error.message}`, "danger") })
-          .finally(() => { button.classList.remove("is-loading"); });
-      })
-    })
-  })
+          .then((data) => {
+            sendNotification(
+              cam,
+              `${button.dataset.cmd}: ${data.status}`,
+              ["error", false].includes(data.status) ? "danger" : "primary",
+            );
+          })
+          .catch((error) => {
+            sendNotification(
+              cam,
+              `${button.dataset.cmd}: ${error.message}`,
+              "danger",
+            );
+          })
+          .finally(() => {
+            button.classList.remove("is-loading");
+          });
+      });
+    });
+  });
+
+  function applyStreamConfigState(group, config) {
+    ["hd", "sd"].forEach((feed) => {
+      const feedConfig = (config.feeds || {})[feed] || {};
+      const button = group.querySelector(
+        `.stream-feed-button[data-feed="${feed}"]`,
+      );
+      const input = group.querySelector(
+        `.stream-kbps-input[data-feed="${feed}"]`,
+      );
+      const meta = group.querySelector(
+        `.stream-feed-meta[data-feed-meta="${feed}"]`,
+      );
+      if (button) {
+        const enabled = !!feedConfig.enabled;
+        const supported = !!feedConfig.supported;
+        button.disabled = !supported;
+        button.classList.toggle("is-primary", enabled);
+        button.classList.toggle("is-selected", enabled);
+        button.classList.toggle("is-static", !supported);
+      }
+      if (input) {
+        input.value = feedConfig.kbps || "";
+        input.disabled = !feedConfig.supported;
+      }
+      if (meta) {
+        const pieces = [];
+        if (feedConfig.path) pieces.push(feedConfig.path.toUpperCase());
+        if (feedConfig.resolution) pieces.push(feedConfig.resolution);
+        if (!feedConfig.supported && feedConfig.reason)
+          pieces.push(feedConfig.reason);
+        meta.textContent = pieces.join(" | ");
+      }
+    });
+  }
+
+  document
+    .querySelectorAll(".stream-config-group[data-cam]")
+    .forEach((group) => {
+      let { cam } = group.dataset;
+      const saveButton = group.querySelector(".stream-config-save");
+      fetch(`api/${cam}/stream-config`, { cache: "no-store" })
+        .then((resp) => resp.json())
+        .then((data) => {
+          if (data.status === "success") {
+            applyStreamConfigState(group, data);
+          }
+        })
+        .catch((error) => {
+          console.error(error);
+        });
+
+      group.querySelectorAll(".stream-feed-button").forEach((button) => {
+        button.addEventListener("click", () => {
+          if (button.disabled) {
+            return;
+          }
+          button.classList.toggle("is-primary");
+          button.classList.toggle("is-selected");
+        });
+      });
+
+      saveButton?.addEventListener("click", () => {
+        saveButton.classList.add("is-loading");
+        const hdButton = group.querySelector(
+          '.stream-feed-button[data-feed="hd"]',
+        );
+        const sdButton = group.querySelector(
+          '.stream-feed-button[data-feed="sd"]',
+        );
+        const hdInput = group.querySelector(
+          '.stream-kbps-input[data-feed="hd"]',
+        );
+        const sdInput = group.querySelector(
+          '.stream-kbps-input[data-feed="sd"]',
+        );
+        const payload = {
+          hd_enabled:
+            !!hdButton &&
+            hdButton.classList.contains("is-primary") &&
+            !hdButton.disabled,
+          sd_enabled:
+            !!sdButton &&
+            sdButton.classList.contains("is-primary") &&
+            !sdButton.disabled,
+          hd_kbps: parseInt(hdInput?.value || "0", 10) || 0,
+          sd_kbps: parseInt(sdInput?.value || "0", 10) || 0,
+        };
+        fetch(`api/${cam}/stream-config`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        })
+          .then((resp) => resp.json())
+          .then((data) => {
+            if (data.status === "success") {
+              applyStreamConfigState(group, data);
+              sendNotification(cam, `Feeds updated: ${data.mode}`, "success");
+              setTimeout(() => {
+                window.location.reload();
+              }, 1200);
+            } else {
+              sendNotification(
+                cam,
+                data.response || "Unable to change stream feeds",
+                "danger",
+              );
+            }
+          })
+          .catch((error) => {
+            sendNotification(cam, `stream feeds: ${error.message}`, "danger");
+          })
+          .finally(() => {
+            saveButton.classList.remove("is-loading");
+          });
+      });
+    });
   document.querySelectorAll(".drag_handle").forEach((e) => {
-    e.addEventListener("mouseenter", () => { e.closest("div.card").classList.add("drag_hover") })
-    e.addEventListener("mouseleave", () => { e.closest("div.card").classList.remove("drag_hover") })
-  })
+    e.addEventListener("mouseenter", () => {
+      e.closest("div.card").classList.add("drag_hover");
+    });
+    e.addEventListener("mouseleave", () => {
+      e.closest("div.card").classList.remove("drag_hover");
+    });
+  });
 
   function notificationEnabled() {
-    if ("Notification" in window === false || window.isSecureContext === false) { return }
-    if (Notification.permission === "granted") { return true }
+    if (
+      "Notification" in window === false ||
+      window.isSecureContext === false
+    ) {
+      return;
+    }
+    if (Notification.permission === "granted") {
+      return true;
+    }
     Notification.requestPermission().then((permission) => {
-      if (permission === "granted") { return true }
+      if (permission === "granted") {
+        return true;
+      }
     });
   }
 
   function sendNotification(title, message, type = "primary") {
-    if (getCookie("fullscreen")) { return }
-    if (notificationEnabled() === true && document.visibilityState != "visible") {
+    if (getCookie("fullscreen")) {
+      return;
+    }
+    if (
+      notificationEnabled() === true &&
+      document.visibilityState != "visible"
+    ) {
       new Notification(title, { body: message });
     } else {
-      bulmaToast.toast({ message: `<strong>${title}</strong> - ${message}`, type: `is-${type}`, pauseOnHover: true, duration: 10000 })
+      bulmaToast.toast({
+        message: `<strong>${title}</strong> - ${message}`,
+        type: `is-${type}`,
+        pauseOnHover: true,
+        duration: 10000,
+      });
     }
   }
   function updateBatteryLevel(card) {
-    if (card.dataset.battery?.toLowerCase() !== "true") { return; }
+    if (card.dataset.battery?.toLowerCase() !== "true") {
+      return;
+    }
     const iconElement = card.querySelector(".icon.battery i");
     fetch(`api/${card.id}/battery`)
       .then((resp) => resp.json())
       .then((data) => {
-        if (data.status != "success" || !data.value) { return; }
+        if (data.status != "success" || !data.value) {
+          return;
+        }
         const batteryLevel = parseInt(data.value);
         let batteryIcon;
         iconElement.classList.remove("has-text-danger");
-        iconElement.classList.forEach(cls => {
-          if (cls.startsWith('fa-battery-')) {
+        iconElement.classList.forEach((cls) => {
+          if (cls.startsWith("fa-battery-")) {
             iconElement.classList.remove(cls);
           }
         });
@@ -816,52 +1207,13 @@ document.addEventListener("DOMContentLoaded", () => {
         }
         iconElement.classList.add(`fa-battery-${batteryIcon}`);
         iconElement.parentElement.title = `Battery Level: ${batteryLevel}%`;
-      })
+      });
   }
-  function applyStreamModeState(group, mode) {
-    group.querySelectorAll(".stream-mode-button").forEach((button) => {
-      const active = button.dataset.mode === mode;
-      button.classList.toggle("is-primary", active);
-      button.classList.toggle("is-selected", active);
+  document
+    .querySelectorAll('div.camera[data-battery="True"]')
+    .forEach((card) => {
+      card
+        .querySelector(".icon.battery")
+        .addEventListener("click", () => updateBatteryLevel(card));
     });
-  }
-
-  document.querySelectorAll(".stream-mode-group[data-cam]").forEach((group) => {
-    let { cam } = group.dataset;
-    fetch(`api/${cam}/stream-mode`, { cache: "no-store" })
-      .then((resp) => resp.json())
-      .then((data) => {
-        if (data.status === "success") {
-          applyStreamModeState(group, data.mode);
-        }
-      })
-      .catch((error) => { console.error(error); });
-
-    group.querySelectorAll(".stream-mode-button").forEach((button) => {
-      button.addEventListener("click", () => {
-        if (button.disabled) { return; }
-        button.classList.add("is-loading");
-        fetch(`api/${cam}/stream-mode`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mode: button.dataset.mode }),
-        })
-          .then((resp) => resp.json())
-          .then((data) => {
-            if (data.status === "success") {
-              applyStreamModeState(group, data.mode);
-              sendNotification(cam, `Stream mode: ${data.mode}`, "success");
-              setTimeout(() => { window.location.reload(); }, 1200);
-            } else {
-              sendNotification(cam, data.response || "Unable to change stream mode", "danger");
-            }
-          })
-          .catch((error) => { sendNotification(cam, `stream mode: ${error.message}`, "danger") })
-          .finally(() => { button.classList.remove("is-loading"); });
-      })
-    })
-  })
-  document.querySelectorAll('div.camera[data-battery="True"]').forEach((card) => {
-    card.querySelector(".icon.battery").addEventListener("click", () => updateBatteryLevel(card));
-  });
 });

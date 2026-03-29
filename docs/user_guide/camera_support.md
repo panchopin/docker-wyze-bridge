@@ -1,6 +1,6 @@
 # Camera Support and Limits
 
-This guide documents the current public `4.1` behavior for the camera models that received the deepest validation in this release cycle.
+This guide documents the current public `4.2` behavior for the camera models that received the deepest validation in this release cycle.
 
 Two important rules:
 
@@ -11,10 +11,10 @@ Two important rules:
 
 | Model | Bridge main | Bridge substream | Home Assistant native `go2rtc` RTSP (`:19554`) | Current public limit |
 | :--- | :--- | :--- | :--- | :--- |
-| Wyze Cam V3 (`WYZE_CAKP2JFUS`) | Supported | Supported on firmware `4.36.10+` | Available, but not the primary documented path for `4.1` | Validated V3-class bridge paths have reached `1920x1080` for both main and substream. Higher output is not promised. |
-| Wyze Cam V3 Pro (`HL_CAM3P`) | Supported | Supported on firmware `4.58.0+` | Available, but no public `4.1` improvement over the standard bridge path is claimed | Validated main stream reached `2560x1440`. `4.1` does not promise a fixed native or substream ceiling for every installation. |
-| Wyze Cam V4 (`HL_CAM4`) | Supported, but standard bridge RTSP can remain `640x360` on some KVS/WebRTC paths | Exposed by the bridge, but not a reliable high/low split in `4.1` | Supported Home Assistant feature in `4.1` | Validated Home Assistant native `go2rtc` path reached `2560x1440` main and `640x360` substream. TUTK fallback is not a reliable way to recover higher RTSP resolution. |
-| Wyze Bulb Cam (`HL_BC`) | Supported | No validated distinct substream in `4.1` | Supported surface exists, but no validated quality gain over the bridge path is claimed | Public `4.1` validation kept both main and `-sd` feeds at `640x360`. No software-only 2K path has been validated. |
+| Wyze Cam V3 (`WYZE_CAKP2JFUS`) | Supported | Supported on firmware `4.36.10+` | Available, but not the primary documented path for `4.2` | Validated V3-class bridge paths have reached `1920x1080` for both main and substream. Higher output is not promised. |
+| Wyze Cam V3 Pro (`HL_CAM3P`) | Supported | Supported on firmware `4.58.0+` | Available, but no public `4.2` improvement over the standard bridge path is claimed | Validated main stream reached `2560x1440`. `4.2` does not promise a fixed native or substream ceiling for every installation. |
+| Wyze Cam V4 (`HL_CAM4`) | Supported, but standard bridge RTSP can remain `640x360` on some KVS/WebRTC paths | Exposed by the bridge, but not a reliable high/low split in `4.2` | Supported Home Assistant feature in `4.2` | Validated Home Assistant native `go2rtc` path reached `2560x1440` main and `640x360` substream. TUTK fallback is not a reliable way to recover higher RTSP resolution. |
+| Wyze Bulb Cam (`HL_BC`) | Supported | No validated distinct substream in `4.2` | Supported surface exists, but no validated quality gain over the bridge path is claimed | Public `4.2` validation kept both main and `-sd` feeds at `640x360`. No software-only 2K path has been validated. |
 
 ## Model Notes
 
@@ -27,12 +27,12 @@ Two important rules:
 ### Wyze Cam V3 Pro
 
 - V3 Pro remains one of the strongest standard-bridge outcomes in the current codebase.
-- The public `4.1` docs only claim the validated main-stream ceiling of `2560x1440`.
-- Native `go2rtc` is included in the Home Assistant add-on, but `4.1` does not promise a better V3 Pro result than the standard bridge path.
+- The public `4.2` docs only claim the validated main-stream ceiling of `2560x1440`.
+- Native `go2rtc` is included in the Home Assistant add-on, but `4.2` does not promise a better V3 Pro result than the standard bridge path.
 
 ### Wyze Cam V4
 
-- V4 is the main reason `4.1` now documents the native Home Assistant `go2rtc` sidecar explicitly.
+- V4 is the main reason `4.2` now documents the native Home Assistant `go2rtc` sidecar explicitly.
 - Standard bridge RTSP can still remain `640x360` even when the camera itself is higher resolution.
 - The supported Home Assistant native sidecar path on `:19554` is the best documented RTSP path for validated V4 installs in this release.
 - The internal sidecar API on `:11984` is not part of the stable public interface.
@@ -40,7 +40,7 @@ Two important rules:
 ### Wyze Bulb Cam
 
 - Bulb Cam is compatible with the modern RTC/WHEP path and remains supported.
-- The important limitation discovered in `4.1` is that compatibility does not equal high-resolution RTSP.
+- The important limitation discovered in `4.2` is that compatibility does not equal high-resolution RTSP.
 - Current public validation keeps both the bridge path and the Home Assistant native sidecar path at `640x360`.
 
 ## General Limits That Apply Across Models

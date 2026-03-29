@@ -374,6 +374,7 @@ def create_app():
             return cam | web_ui.format_stream(cam_name)
         return {"error": f"Could not find camera [{cam_name}]"}
 
+    @app.route("/api/<string:cam_name>/stream-config", methods=["GET", "PUT", "POST"])
     @app.route("/api/<string:cam_name>/stream-mode", methods=["GET", "PUT", "POST"])
     @auth_required
     def api_cam_stream_mode(cam_name: str):
@@ -382,38 +383,28 @@ def create_app():
             return {"status": "error", "response": f"Camera [{cam_name}] not found"}, 404
 
         if request.method == "GET":
-            mode = wb.camera_stream_mode(camera) or (
-                "both" if wb.camera_substream_enabled(camera) else "main"
-            )
-            return {
-                "status": "success",
-                "camera": camera.name_uri,
-                "mode": mode,
-                "supports_substream": bool(camera.bridge_can_substream),
-            }
+            config = wb.camera_stream_config(camera)
+            return {"status": "success", "camera": camera.name_uri} | config
 
         payload = request.get_json(silent=True) or {}
-        mode = str(
-            payload.get("mode") or request.values.get("mode") or request.args.get("mode") or ""
-        ).strip().lower()
-        if mode == "sub" and not camera.bridge_can_substream:
-            return {
-                "status": "error",
-                "response": "Sub stream is not available for this camera",
-            }, 409
-
         try:
-            saved_mode = set_camera_stream_mode(camera.name_uri, mode)
-        except ValueError:
-            return {"status": "error", "response": "Invalid stream mode"}, 400
+            if ({"hd_enabled", "sd_enabled", "hd_kbps", "sd_kbps"} & set(payload)):
+                config = wb.apply_camera_stream_config(camera, payload)
+            elif "mode" in payload:
+                mode = str(
+                    payload.get("mode") or request.values.get("mode") or request.args.get("mode") or ""
+                ).strip().lower()
+                saved_mode = set_camera_stream_mode(camera.name_uri, mode)
+                config = wb.camera_stream_config(camera)
+                config["mode"] = saved_mode
+            else:
+                config = wb.camera_stream_config(camera)
+        except ValueError as ex:
+            message = str(ex) or "Invalid stream configuration"
+            return {"status": "error", "response": message}, 409 if "not available" in message else 400
 
         wb.refresh_cams()
-        return {
-            "status": "success",
-            "camera": camera.name_uri,
-            "mode": saved_mode,
-            "supports_substream": bool(camera.bridge_can_substream),
-        }
+        return {"status": "success", "camera": camera.name_uri} | config
 
     @app.route("/api/<string:cam_name>/talkback", methods=["POST"])
     @auth_required

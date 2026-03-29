@@ -2,7 +2,7 @@
 
 ## AlexxIT/go2rtc
 
-The Home Assistant add-on bundles the `go2rtc` binary for the native RTSP sidecar introduced in the `4.1` release line.
+The Home Assistant add-on bundles the `go2rtc` binary for the native RTSP sidecar carried forward in the `4.2` release line.
 
 - Project: `https://github.com/AlexxIT/go2rtc`
 - Author: Alexey Khit

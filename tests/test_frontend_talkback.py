@@ -130,7 +130,7 @@ class TestFrontendTalkback(unittest.TestCase):
         client = self.create_client()
         FakeBridge.stream_info = {
             "talkback_supported": False,
-            "talkback_reason": "talkback is limited to native-selected cameras in 4.1.1",
+            "talkback_reason": "talkback is limited to native-selected cameras in 4.2",
             "talkback_alias": "north-yard",
             "native_alias": "north-yard",
         }

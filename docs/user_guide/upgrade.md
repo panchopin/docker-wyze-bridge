@@ -1,11 +1,12 @@
 # Upgrade Guide
 
-This guide covers upgrading to the `4.1` release line of Docker Wyze Bridge from older upstream builds or earlier releases in this fork.
+This guide covers upgrading to the `4.2` release line of Docker Wyze Bridge from older upstream builds or earlier releases in this fork.
 
-## What Changes in 4.1
+## What Changes in 4.2
 
 - The visible product name is now `Docker Wyze Bridge`.
 - The Home Assistant add-on now bundles a native `go2rtc` sidecar and exposes RTSP on `:19554`.
+- The shared Web UI now exposes granular per-camera `HD` and `SD` feed selection with separate bitrate targets.
 - Public documentation now includes model-specific stream ceilings and substream limits for `V3`, `V3 Pro`, `V4`, and `Wyze Bulb Cam`.
 
 ## Migration Steps

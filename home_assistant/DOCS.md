@@ -44,16 +44,16 @@ The add-on form is intentionally focused on the common Home Assistant setup path
 
 Important:
 
-- `:19554` is the supported public sidecar surface in `4.1`.
+- `:19554` is the supported public sidecar surface in `4.2`.
 - `:11984` is an internal implementation detail and not part of the stable public interface.
 - A `-sd` alias may exist for some cameras, but it is only useful when the camera exposes a meaningful second stream.
 
 ## Camera-Specific Limits
 
-The public `4.1` release intentionally documents current limits rather than implying every modern Wyze model behaves the same.
+The public `4.2` release intentionally documents current limits rather than implying every modern Wyze model behaves the same.
 
 - Wyze Cam V3: bridge main and firmware-gated bridge substream are supported; validated V3-class paths have reached `1920x1080`.
-- Wyze Cam V3 Pro: bridge main validated at `2560x1440`; `4.1` does not promise a fixed substream ceiling for every installation.
+- Wyze Cam V3 Pro: bridge main validated at `2560x1440`; `4.2` does not promise a fixed substream ceiling for every installation.
 - Wyze Cam V4: standard bridge RTSP may remain `640x360`; validated Home Assistant native sidecar output reached `2560x1440` main and `640x360` substream.
 - Wyze Bulb Cam: supported, but current public validation keeps both main and `-sd` at `640x360`.
 

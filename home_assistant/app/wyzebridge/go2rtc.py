@@ -95,7 +95,7 @@ def native_stream_info(camera, substream: bool = False) -> dict[str, Any]:
         talkback_reason = "talkback requires a reachable go2rtc sidecar"
     elif supported:
         talkback_supported = False
-        talkback_reason = "talkback is limited to native-selected cameras in 4.1.1"
+        talkback_reason = "talkback is limited to native-selected cameras in 4.2"
     else:
         talkback_supported = False
         talkback_reason = "talkback is unavailable until native go2rtc is validated for this model"

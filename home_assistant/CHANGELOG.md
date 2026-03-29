@@ -10,6 +10,17 @@ Patch release focused on the shared native `go2rtc` runtime path and clearer nat
 - Add camera-level native selection metadata, native snapshot routing, and richer `/health/details` diagnostics so `HL_CAM4` can prefer native while `HL_BC` stays bridge-first.
 - Add API-first native talkback through `POST /api/<camera>/talkback` for cameras already validated on the native sidecar path.
 
+## What's Changed in v4.2.0
+
+Release focused on runtime-tree alignment, granular feed publishing controls, and release-surface cleanup.
+
+### Major Changes
+
+- Normalize the shared Web UI runtime across the root app, production add-on, and local dev add-on while preserving the intentional dev-only `:55000` loopback talkback port.
+- Carry the merged per-camera feed configuration work across the runtime trees, including `HD` and `SD` enablement, per-feed kbps targets, and surfaced feed metadata in the Web UI.
+- Keep the public add-on and docs aligned around the supported native `go2rtc` RTSP surface on `:19554`, with `:11984` still treated as internal-only.
+- Bump release and packaging surfaces to `4.2.0` and the dev add-on surfaces to `4.2.0-dev`.
+
 ## What's Changed in v4.0.2
 
 Patch release focused on startup hardening and Home Assistant runtime validation.
