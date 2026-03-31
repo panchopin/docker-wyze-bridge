@@ -1,6 +1,7 @@
 # Lessons
 
 - Keep repo-tracked env files free of secrets. Use git-ignored local override files for any real keys or host-specific values.
+- For patch-release wrap-up, re-check the public repo homepage too. It is easy for `home_assistant/CHANGELOG.md` and `docs/user_guide/release_notes_v4.md` to mention the new patch while `README.md` still advertises the previous one.
 - Never embed stream credentials into URLs rendered by the UI or returned by the API. Use request headers for authenticated playback instead.
 - Keep internal bridge and proxy surfaces on loopback when they are only meant for local process-to-process traffic.
 - Put `.dockerignore` at the build-context root so local override files like `*.env.local` and `build.env.local` cannot enter image builds.
