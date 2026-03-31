@@ -24,11 +24,21 @@ Create local WebRTC, RTSP, RTMP, and HLS streams for Wyze cameras without custom
 - Public docs and add-on/package version surfaces are aligned for the `4.2.5` release.
 
 ## 4.2 Patch Releases
+
 ### 4.2.5
 
 - Refreshes preserved native `go2rtc` Wyze aliases from the current `/api/wyze` helper output at startup instead of freezing them when a seeded config already exists.
 - Installs `curl` in the runtime images so the sidecar refresh helper can actually reach the local `go2rtc` API from the running add-on.
 
+### 4.2.4
+
+- Fixes Home Assistant feed-selection precedence so explicit `CAM_OPTIONS` `HD` and `SD` values override stale saved per-camera feed settings.
+- Stops creating a competing bridge-managed `-sub` path when the SD feed is native-selected, which prevents `north-yard-sub` churn from surviving an explicit `SD=false` setting.
+
+### 4.2.3
+
+- Fixes the Web UI asset path regression that could leave the app page effectively unstyled even though camera content still rendered.
+- Makes the frontend bind its own `static/` and `templates/` directories explicitly in all three runtime trees and uses ingress-aware template asset URLs so CSS and JS resolve correctly under Home Assistant ingress and normal app routing.
 
 ### 4.2.2
 
@@ -72,6 +82,7 @@ Full caveats, firmware notes, and public limitations live in [Camera Support](./
 - The visible add-on name is `Docker Wyze Bridge`, while the existing Home Assistant slug stays in place for migration stability.
 - The Home Assistant add-on now keeps required login fields at the top, trims the HA form down to common day-to-day settings, uses much clearer optional-setting descriptions, and supports per-camera feed selection through `CAM_OPTIONS` and the Web UI with independent `HD` and `SD` toggles, per-feed kbps targets, surfaced feed resolution labels, and disabled controls for unsupported feeds. Rare power-user knobs are kept out of the HA form so the page stays manageable. On the March 29, 2026 validation host, the live dev add-on at `:55000` now shows Bulb Cam style `HD disabled / SD enabled` state correctly and completed a browser-driven settings round-trip on a supported camera.
 - The March 29, 2026 `4.2.1` bugfix follow-up also fixed an important Home Assistant defaulting gap: explicit per-camera `CAM_OPTIONS` `HD` and `SD` values now apply as the runtime defaults even when `/config/wyze_camera_settings.json` is absent, so an `SD`-only setup no longer depends on a hidden saved-settings file.
+- The `4.2.4` follow-up closes the remaining Home Assistant precedence gap: explicit add-on `CAM_OPTIONS` `HD` and `SD` booleans now also beat stale saved per-camera values, and a native-selected SD feed no longer creates a competing bridge-managed `-sub` path.
 - The `4.2.5` follow-up also refreshes preserved native `go2rtc` Wyze aliases from the live helper output on every startup, so stale helper URLs do not keep a camera like `north-yard` pinned to an old producer address after the box or camera IP changes.
 - The March 29, 2026 `4.2.1` release also fixes a Home Assistant Frigate startup conflict: the bundled native `go2rtc` sidecar now disables its default WebRTC listener so it no longer silently grabs host port `8555`.
 - The current `4.2.2` follow-up hardens MQTT motion semantics for Home Assistant and Scrypted workflows: the BOA/LAN motion path now publishes on the correct `wyzebridge/<camera>/motion` topic with the same `1`/`2` payload contract as the API motion path, and event-driven motion expiry now uses bridge receipt time plus a deterministic monitor-loop expiry check so `motion=2` does not depend on a later UI/API poll.
