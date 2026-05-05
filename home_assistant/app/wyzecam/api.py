@@ -29,7 +29,7 @@ SCALE_USER_AGENT = f"Wyze/{APP_VERSION} (iPhone; iOS {IOS_VERSION}; Scale/3.00)"
 AUTH_API = "https://auth-prod.api.wyze.com"
 WYZE_API = "https://api.wyzecam.com/app"
 
-SSL_VERIFY: bool | str = getenv("SSL_VERIFY", "true").lower()
+SSL_VERIFY: bool | str = getenv("SSL_VERIFY", "false").lower()
 if SSL_VERIFY in {"false", "0", "no", "disable", "off"}:
     SSL_VERIFY = False
     import urllib3

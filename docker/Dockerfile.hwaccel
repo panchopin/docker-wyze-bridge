@@ -5,6 +5,13 @@ ARG GITHUB_SHA
 ARG QSV
 FROM amd64/python:3.13-slim-bookworm AS base
 
+FROM golang:1.23 AS whep_builder
+
+COPY /home_assistant/whep_proxy/ /build/whep_proxy/
+WORKDIR /build/whep_proxy
+RUN go mod download
+RUN go build -o /build/whep_proxy/whep_proxy
+
 FROM base AS builder
 ARG BUILD_DATE
 ARG QSV
@@ -75,13 +82,15 @@ ARG QSV
 
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends curl; \
+    apt-get install -y --no-install-recommends curl ca-certificates; \
+    update-ca-certificates; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/*; \
     rm /var/log/*.log ; \
     rm -rf /var/log/apt ;
 
 COPY --from=builder /build /
+COPY --from=whep_builder /build/whep_proxy/whep_proxy /usr/local/bin/whep_proxy
 
 ENV PYTHONUNBUFFERED=1 FLASK_APP=frontend BUILD=$BUILD BUILD_VERSION=$BUILD_VERSION BUILD_DATE=$BUILD_DATE GITHUB_SHA=$GITHUB_SHA FLASK_ENV=production FLASK_DEBUG=0
 WORKDIR /app

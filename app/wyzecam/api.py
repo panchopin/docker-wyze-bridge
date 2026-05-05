@@ -8,7 +8,8 @@ from hashlib import md5
 from os import getenv
 from typing import Any, Optional
 
-from requests import PreparedRequest, Response, get, post
+from requests import PreparedRequest, Response
+import requests as _requests
 
 from wyzebridge.build_config import APP_VERSION, IOS_VERSION, VERSION
 from wyzecam.api_models import WyzeAccount, WyzeCamera, WyzeCredential
@@ -16,7 +17,29 @@ from wyzecam.api_models import WyzeAccount, WyzeCamera, WyzeCredential
 SCALE_USER_AGENT = f"Wyze/{APP_VERSION} (iPhone; iOS {IOS_VERSION}; Scale/3.00)"
 AUTH_API = "https://auth-prod.api.wyze.com"
 WYZE_API = "https://api.wyzecam.com/app"
+SSL_VERIFY: bool | str = getenv("SSL_VERIFY", "false").lower()
+if SSL_VERIFY in {"false", "0", "no", "disable", "off"}:
+    SSL_VERIFY = False
+    import urllib3
+
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+elif getenv("SSL_CERT_FILE"):
+    SSL_VERIFY = getenv("SSL_CERT_FILE")
+elif getenv("REQUESTS_CA_BUNDLE"):
+    SSL_VERIFY = getenv("REQUESTS_CA_BUNDLE")
+else:
+    SSL_VERIFY = True
 CLOUD_API = "https://app-core.cloud.wyze.com/app"
+
+
+def get(url, **kwargs):
+    kwargs.setdefault("verify", SSL_VERIFY)
+    return _requests.get(url, **kwargs)
+
+
+def post(url, **kwargs):
+    kwargs.setdefault("verify", SSL_VERIFY)
+    return _requests.post(url, **kwargs)
 SC_SV = {
     "default": {
         "sc": "9f275790cab94a72bd206c8876429f3c",

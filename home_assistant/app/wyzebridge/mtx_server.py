@@ -25,6 +25,22 @@ from wyzebridge.logging import logger
 
 MTX_CONFIG: str = "/app/mediamtx.yml" if Path("/app").exists() else ".runtime/mediamtx.yml"
 MTX_PATH: str = "%path"
+MTX_ADDRESS_KEYS: dict[str, str] = {
+    "apiAddress": "MTX_APIADDRESS",
+    "hlsAddress": "MTX_HLSADDRESS",
+    "metricsAddress": "MTX_METRICSADDRESS",
+    "playbackAddress": "MTX_PLAYBACKADDRESS",
+    "pprofAddress": "MTX_PPROFADDRESS",
+    "rtcpAddress": "MTX_RTCPADDRESS",
+    "rtmpAddress": "MTX_RTMPADDRESS",
+    "rtmpsAddress": "MTX_RTMPSADDRESS",
+    "rtpAddress": "MTX_RTPADDRESS",
+    "rtspAddress": "MTX_RTSPADDRESS",
+    "rtspsAddress": "MTX_RTSPSADDRESS",
+    "srtAddress": "MTX_SRTADDRESS",
+    "webrtcAddress": "MTX_WEBRTCADDRESS",
+    "webrtcLocalUDPAddress": "MTX_WEBRTCLOCALUDPADDRESS",
+}
 
 
 def run_on_demand_start_timeout() -> str:
@@ -123,6 +139,9 @@ class MtxServer:
             mtx.set("hlsVariant", MTX_HLSVARIANT)
             mtx.set("readTimeout", MTX_READTIMEOUT)
             mtx.set("writeQueueSize", MTX_WRITEQUEUESIZE)
+            for key, env_name in MTX_ADDRESS_KEYS.items():
+                if value := os.getenv(env_name):
+                    mtx.set(key, value)
 
             if STUN_SERVER != "":
                 logger.info(f"[MTX] enabling STUN server at: {STUN_SERVER}")
