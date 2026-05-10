@@ -1,4 +1,14 @@
-# Release Notes 4.2
+# Release Notes 4.3
+
+## 4.3.0 Release
+
+`4.3.0` is a Home Assistant reliability release for snapshots, native `go2rtc`, and the late 4.2 streaming hardening work.
+
+- API snapshot mode now serves `/snapshot/<camera>.jpg` through the fast Wyze thumbnail path instead of making a slower RTSP snapshot attempt.
+- Thumbnail requests for `-sub` stream names can fall back to the base camera thumbnail when Wyze only exposes the primary camera image.
+- V4 native `go2rtc` metadata now treats the validated SD alias as selected when the sidecar is reachable.
+- Users who need to correct stale Wyze helper LAN addresses can opt in with `GO2RTC_LAN_IP_OVERRIDES=MAC=host,MAC=host`; the release does not ship any private LAN overrides.
+- The WHEP and MediaMTX fixes from the end of the 4.2 line are included, reducing stuck no-media startup sessions and shared-host port conflicts.
 
 `4.2` is a cleanup and usability release.
 

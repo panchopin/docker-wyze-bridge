@@ -195,6 +195,9 @@ configuration:
   WB_IP:
     name: WebRTC advertised IP
     description: Advanced. Override the IP address announced to WebRTC clients. Leave blank unless local playback works but other devices cannot connect.
+  GO2RTC_LAN_IP_OVERRIDES:
+    name: go2rtc LAN IP overrides
+    description: Advanced. Optional comma-separated MAC=host list for native go2rtc helper URLs that keep a stale LAN address after DHCP changes.
   STUN_SERVER:
     name: STUN server
     description: Optional. Override the STUN server used for WebRTC NAT traversal. Leave blank unless you know you need a different one.

@@ -26,6 +26,7 @@ _VALIDATED_NATIVE_MODELS = {
     "HL_CAM4": {
         "reason": "HL_CAM4 validated on native go2rtc with higher-resolution main stream",
         "selected": True,
+        "sub_selected": True,
     },
     "HL_BC": {
         "reason": "HL_BC stays bridge-first because native go2rtc still validated at 640x360",

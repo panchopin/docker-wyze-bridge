@@ -1,5 +1,17 @@
 # What's Changed
 
+## What's Changed in v4.3.0
+
+Release focused on Home Assistant snapshot reliability and native `go2rtc` follow-up fixes.
+
+### Major Changes
+
+- In API snapshot mode, Home Assistant `/snapshot/<camera>.jpg` requests now use the fast Wyze API thumbnail path instead of forcing an RTSP/ffmpeg snapshot attempt.
+- `/thumb/<camera-sub>.jpg` requests can fall back to the base camera URI when Wyze only exposes a thumbnail for the primary camera name, improving Scrypted/HomeKit-style snapshot consumers.
+- Mark `HL_CAM4` native SD aliases as selected when the native sidecar is reachable, matching the validated V4 main/native behavior.
+- Replace the private hardcoded LAN helper-address workaround with the optional `GO2RTC_LAN_IP_OVERRIDES` environment variable for users who need to correct stale Wyze helper URLs after DHCP changes.
+- Carry forward the late 4.2 WHEP and MediaMTX hardening so stale no-media sessions and shared-host port conflicts are less likely to wedge streams.
+
 ## What's Changed in v4.2.9
 
 Patch release fixing a startup race that caused native-only cameras (`north-yard`, `hamster`) to appear offline in HomeKit via Scrypted after every bridge restart.

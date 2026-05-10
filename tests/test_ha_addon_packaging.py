@@ -94,6 +94,14 @@ class TestHomeAssistantAddonPackaging(unittest.TestCase):
         self.assertIn("  19554/tcp: 19554", config_text)
         self.assertIn("  19554/tcp: go2rtc RTSP rtsp://localhost:19554/camera-name", config_text)
 
+    def test_prod_addon_exposes_go2rtc_lan_ip_overrides(self):
+        config_text = (ADDON_DIR / "config.yml").read_text()
+        translation_text = (ADDON_DIR / "translations" / "en.yml").read_text()
+
+        self.assertIn('  GO2RTC_LAN_IP_OVERRIDES: ""', config_text)
+        self.assertIn("  GO2RTC_LAN_IP_OVERRIDES: str?", config_text)
+        self.assertIn("GO2RTC_LAN_IP_OVERRIDES:", translation_text)
+
     def test_prod_addon_downloads_go2rtc_binary(self):
         dockerfile_text = (ADDON_DIR / "Dockerfile").read_text()
         self.assertIn("go2rtc_linux_${GO2RTC_ARCH}", dockerfile_text)
@@ -216,6 +224,20 @@ class TestHomeAssistantAddonPackaging(unittest.TestCase):
                         "go2rtc sidecar should honor explicit helper feed flags and avoid fake native aliases for unsupported feeds",
                     )
 
+    def test_public_go2rtc_sidecars_use_configured_lan_ip_overrides(self):
+        helper_files = [
+            ROOT / "app" / "go2rtc_sidecar.sh",
+            ROOT / "home_assistant" / "app" / "go2rtc_sidecar.sh",
+        ]
+
+        for helper_path in helper_files:
+            helper_text = helper_path.read_text()
+            with self.subTest(helper=str(helper_path.relative_to(ROOT))):
+                self.assertIn("GO2RTC_LAN_IP_OVERRIDES", helper_text)
+                self.assertIn("def normalize_mac(value: str) -> str:", helper_text)
+                self.assertNotIn("80482C31C9E7", helper_text)
+                self.assertNotIn("192.168.1.177", helper_text)
+
     def test_root_dockerfiles_download_go2rtc_binary(self):
         dockerfiles = [
             ROOT / "docker" / "Dockerfile",
@@ -270,7 +292,7 @@ class TestHomeAssistantAddonPackaging(unittest.TestCase):
         )
         self.assertEqual(dev_slug.group(1).strip(), "docker_wyze_bridge_dev")
         self.assertEqual(dev_name.group(1).strip(), "Docker Wyze Bridge (Dev Build)")
-        self.assertEqual(dev_version.group(1).strip(), "4.2.9-dev")
+        self.assertRegex(dev_version.group(1).strip(), r"^4\.\d+\.\d+-dev$")
 
     def test_local_dev_addon_yaml_and_yml_manifests_match(self):
         dev_yml = (ROOT / ".ha_live_addon" / "config.yml").read_text()

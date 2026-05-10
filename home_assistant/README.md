@@ -1,6 +1,6 @@
 # Docker Wyze Bridge
 
-This Home Assistant add-on provides local WebRTC, RTSP, RTMP, and HLS access for Wyze cameras. The `4.2` release line keeps the established bridge path, bundles a native `go2rtc` sidecar for Home Assistant, and documents the model-specific limits now known for newer Wyze cameras. The `4.2.1` patch line fixed the sidecar `:8555` conflict on Home Assistant hosts, `4.2.2` hardens the MQTT motion path used by Home Assistant and Scrypted workflows, `4.2.4` tightens feed-selection precedence so explicit `CAM_OPTIONS` values beat stale saved settings without spinning up the wrong bridge substream, `4.2.5` refreshes preserved native Wyze aliases with the current helper URLs at startup, `4.2.6` closes the remaining ingress UI asset gap while making native alias prep follow the bridge's live published camera catalog, `4.2.7` keeps native-only V3 Pro SD feeds available for Home Assistant SD-only setups, `4.2.8` stabilizes the bundled WHEP proxy so removed streams stop reconnect-looping and dead no-media startup sessions get replaced cleanly, and `4.2.9` fixes the native startup race that could briefly make native-only cameras look offline after a bridge restart.
+This Home Assistant add-on provides local WebRTC, RTSP, RTMP, and HLS access for Wyze cameras. The `4.3.0` release keeps the established bridge path, bundles a native `go2rtc` sidecar for Home Assistant, improves API snapshot and thumbnail behavior for Scrypted/HomeKit-style consumers, and carries forward the late 4.2 WHEP, MediaMTX, and native-startup reliability fixes.
 
 ## Installation
 
@@ -17,11 +17,11 @@ This Home Assistant add-on provides local WebRTC, RTSP, RTMP, and HLS access for
 
 ## Camera Limits
 
-Public `4.2` behavior is documented by model, including current resolution ceilings and whether a meaningful main/sub split is available.
+Public `4.3` behavior is documented by model, including current resolution ceilings and whether a meaningful main/sub split is available.
 
 - Wyze Cam V3: bridge path validated up to `1920x1080`, with firmware-gated substream support.
 - Wyze Cam V3 Pro: bridge main validated up to `2560x1440`; `4.2` does not promise a fixed substream ceiling on every install.
-- Wyze Cam V4: Home Assistant native `go2rtc` is the best-documented RTSP path in `4.2`; validated native output reached `2560x1440` main and `640x360` substream.
+- Wyze Cam V4: Home Assistant native `go2rtc` is the best-documented RTSP path in `4.3`; validated native output reached `2560x1440` main and `640x360` substream.
 - Wyze Bulb Cam: supported, but current public `4.2` validation keeps both main and `-sd` feeds at `640x360`.
 
 See [Camera Support](../docs/user_guide/camera_support.md) for the full matrix.

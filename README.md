@@ -8,12 +8,20 @@
 
 ![Wyze Bridge UI](https://user-images.githubusercontent.com/67088095/224595527-05242f98-c4ab-4295-b9f5-07051ced1008.png)
 
-Create local WebRTC, RTSP, RTMP, and HLS streams for Wyze cameras without custom firmware. This fork focuses on newer Wyze camera behavior, Home Assistant packaging, and the real limitations and runtime behavior validated for the 4.2 release.
+Create local WebRTC, RTSP, RTMP, and HLS streams for Wyze cameras without custom firmware. This fork focuses on newer Wyze camera behavior, Home Assistant packaging, and the real limitations and runtime behavior validated for the 4.3 release.
 
 - No camera firmware mods required.
 - Home Assistant add-on with visible Wyze login fields by default.
 - WebRTC/KVS-backed bridge path for modern Wyze models.
-- Native Home Assistant `go2rtc` RTSP sidecar on `:19554` for supported 4.2 workflows.
+- Native Home Assistant `go2rtc` RTSP sidecar on `:19554` for supported 4.3 workflows.
+
+## 4.3 Highlights
+
+- Home Assistant API snapshot mode now avoids slow RTSP snapshot attempts and uses the fast Wyze thumbnail path instead.
+- `-sub` thumbnail requests can fall back to the base camera thumbnail, which helps Scrypted/HomeKit-style consumers that ask for substream image names.
+- Native `go2rtc` V4 metadata now covers the validated SD alias as well as the main alias.
+- Advanced Home Assistant users can set `GO2RTC_LAN_IP_OVERRIDES` when Wyze helper URLs keep a stale LAN address after DHCP changes; no private LAN overrides are built in.
+- The late 4.2 WHEP and MediaMTX stability fixes are included in this release line, reducing stuck no-media sessions and port conflicts on shared Home Assistant hosts.
 
 ## 4.2 Highlights
 
@@ -21,7 +29,7 @@ Create local WebRTC, RTSP, RTMP, and HLS streams for Wyze cameras without custom
 - Camera metadata, `/health/details`, and the Web UI now expose per-camera native-vs-bridge selection plus granular `HD` and `SD` feed publishing controls.
 - `frontend.py`, `site.js`, and `index.html` are normalized across the three runtime trees where behavior should match, while preserving the intentional dev add-on `:55000` talkback loopback port.
 - API-first native talkback remains limited to native-selected cameras, with uploaded-audio talkback validated on native-selected V4 paths.
-- Public docs and add-on/package version surfaces are aligned for the `4.2.9` release.
+- Public docs and add-on/package version surfaces are aligned for the `4.2.9` release; `4.3.0` adds the Home Assistant snapshot and native V4 follow-up fixes above.
 
 ## 4.2 Patch Releases
 

@@ -527,6 +527,8 @@ def create_app():
     @auth_required
     def rtsp_snapshot(img_file: str):
         """Use ffmpeg to take a snapshot from the rtsp stream."""
+        if config.SNAPSHOT_TYPE == "api":
+            return thumbnail(img_file)
         if wb.streams.get_snapshot(Path(img_file).stem)["ok"]:
             return send_from_directory(config.IMG_PATH, img_file)
 
@@ -554,8 +556,14 @@ def create_app():
     @app.route("/thumb/<string:img_file>")
     @auth_required
     def thumbnail(img_file: str):
-        if wb.api.save_thumbnail(Path(img_file).stem, ""):
-            return send_from_directory(config.IMG_PATH, img_file)
+        path = Path(img_file)
+        stem = path.stem
+        candidates = [stem]
+        if stem.endswith("-sub"):
+            candidates.append(stem.removesuffix("-sub"))
+        for uri in candidates:
+            if wb.api.save_thumbnail(uri, ""):
+                return send_from_directory(config.IMG_PATH, f"{uri}{path.suffix}")
 
         return redirect("/static/notavailable.svg", code=307)
 

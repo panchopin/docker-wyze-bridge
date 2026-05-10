@@ -291,6 +291,31 @@ def with_subtype(url: str, subtype: str) -> str:
     return urllib.parse.urlunsplit(parsed._replace(query=urllib.parse.urlencode(filtered)))
 
 
+def normalize_mac(value: str) -> str:
+    return re.sub(r"[^0-9A-F]", "", str(value or "").upper())
+
+
+def lan_ip_overrides() -> dict[str, str]:
+    overrides = {}
+    for item in os.environ.get("GO2RTC_LAN_IP_OVERRIDES", "").split(","):
+        if "=" not in item:
+            continue
+        mac, host = item.split("=", 1)
+        mac = normalize_mac(mac)
+        host = host.strip()
+        if mac and host:
+            overrides[mac] = host
+    return overrides
+
+
+def with_lan_ip_override(url: str, cam: dict) -> str:
+    ip = lan_ip_overrides().get(normalize_mac(cam.get("mac") or cam.get("mac_address") or ""))
+    if not ip:
+        return url
+    parsed = urllib.parse.urlsplit(url)
+    return urllib.parse.urlunsplit(parsed._replace(netloc=ip))
+
+
 def parse_model(info: str, url: str) -> str:
     if info:
         model = str(info).split("|", 1)[0].strip()
@@ -480,7 +505,7 @@ for cam in cams:
 
     for alias, subtype in aliases:
         lines.append(f"  {alias}:")
-        lines.append(f"    - {with_subtype(url, subtype)}")
+        lines.append(f"    - {with_subtype(with_lan_ip_override(url, cam), subtype)}")
         print(f"[GO2RTC] Prepared stream: {alias} ({info}) subtype={subtype}", flush=True)
         added += 1
 
