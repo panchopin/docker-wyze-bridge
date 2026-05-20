@@ -1,5 +1,14 @@
 # Release Notes 4.3
 
+## 4.3.3 Release
+
+`4.3.3` is a narrow SD-only native-feed reliability patch for the `4.3` release line.
+
+- Native `go2rtc` stream diagnostics now fall back from the fast per-alias probe to the full stream table when the fast probe times out or returns invalid data.
+- SD-only setups can keep a working `*-sd` alias selected when `go2rtc` is already producing that stream, instead of falling back to a dead main/KVS route because one readiness probe was slow.
+- Snapshot paths that depend on a stable RTSP/prebuffer feed benefit from the same alias stability, especially when the still image is captured from the SD stream rather than forced through a fresh snapshot request.
+- The regression test covers the slow per-alias probe case and proves the full stream table can still mark the SD alias alive.
+
 ## 4.3.2 Release
 
 `4.3.2` is a Home Assistant stability and release-hygiene patch for the `4.3` release line.

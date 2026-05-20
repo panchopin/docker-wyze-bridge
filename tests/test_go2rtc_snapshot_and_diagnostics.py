@@ -174,6 +174,7 @@ class TestGo2RtcSnapshotAndDiagnostics(unittest.TestCase):
         go2rtc_module._GO2RTC_API_REACHABLE_CACHE.clear()
         go2rtc_module._NATIVE_ALIAS_READY_CACHE.clear()
         requests_stub.get.reset_mock()
+        requests_stub.get.side_effect = None
         requests_stub.put.reset_mock()
         requests_stub.post.reset_mock()
 
@@ -262,6 +263,43 @@ class TestGo2RtcSnapshotAndDiagnostics(unittest.TestCase):
             f"{go2rtc_module.go2rtc_api_base()}/api/streams",
             params={"src": "north-yard", "microphone": "any"},
             timeout=2.0,
+        )
+
+    def test_stream_details_falls_back_to_full_stream_table_when_src_probe_fails(self):
+        full_response = Mock()
+        full_response.raise_for_status.return_value = None
+        full_response.json.return_value = {
+            "sample-cam-sd": {
+                "producers": [
+                    {
+                        "source": "wyze://192.0.2.175?mac=AABBCCDDEEFF&subtype=sd",
+                        "receivers": [{"bytes": 648723}],
+                    }
+                ],
+                "consumers": [],
+            }
+        }
+        requests_stub.get.side_effect = [Exception("src probe timed out"), full_response]
+
+        details = go2rtc_module._go2rtc_stream_details("sample-cam-sd")
+
+        self.assertEqual(
+            details["producers"][0]["source"],
+            "wyze://192.0.2.175?mac=AABBCCDDEEFF&subtype=sd",
+        )
+        self.assertEqual(requests_stub.get.call_count, 2)
+        requests_stub.get.assert_has_calls(
+            [
+                call(
+                    f"{go2rtc_module.go2rtc_api_base()}/api/streams",
+                    params={"src": "sample-cam-sd", "microphone": "any"},
+                    timeout=2.0,
+                ),
+                call(
+                    f"{go2rtc_module.go2rtc_api_base()}/api/streams",
+                    timeout=2.0,
+                ),
+            ]
         )
 
     @patch.object(go2rtc_module.time, "sleep")

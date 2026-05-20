@@ -326,7 +326,20 @@ def _go2rtc_stream_details(alias: str, timeout: float = 2.0) -> dict[str, Any]:
         data = response.json()
         return data if isinstance(data, dict) else {}
     except (requests.RequestException, ValueError):
+        pass
+    try:
+        response = requests.get(
+            f"{go2rtc_api_base()}/api/streams",
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if isinstance(data, dict):
+            details = data.get(alias)
+            return details if isinstance(details, dict) else {}
+    except (requests.RequestException, ValueError):
         return {}
+    return {}
 
 
 _MEDIA_CODEC_RE = re.compile(r"^audio,\s+(sendonly|recvonly),\s+([^,]+)$", re.IGNORECASE)

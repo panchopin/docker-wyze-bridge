@@ -1,5 +1,15 @@
 # What's Changed
 
+## What's Changed in v4.3.3
+
+Patch release focused on SD-only native `go2rtc` alias reliability.
+
+### Major Changes
+
+- Fall back from the quick per-alias `go2rtc` stream probe to the full stream table when the quick probe times out or returns invalid data.
+- Keep working `*-sd` native aliases selected in SD-only setups instead of briefly falling back to a dead main/KVS route under load.
+- Add regression coverage for the slow per-alias probe case so snapshot/prebuffer consumers can continue to rely on the stable SD RTSP target.
+
 ## What's Changed in v4.3.2
 
 Patch release focused on Home Assistant startup readiness, SD-only production behavior, WHEP recovery, and public release hygiene.

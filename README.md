@@ -15,6 +15,12 @@ Create local WebRTC, RTSP, RTMP, and HLS streams for Wyze cameras without custom
 - WebRTC/KVS-backed bridge path for modern Wyze models.
 - Native Home Assistant `go2rtc` RTSP sidecar on `:19554` for supported 4.3 workflows.
 
+## 4.3.3 Highlights
+
+- SD-only native `go2rtc` streams now stay selected when the quick per-stream readiness probe times out but the full `go2rtc` stream table still proves the alias is alive. This prevents a working `*-sd` feed from falling back to a dead main/KVS path under load.
+- Snapshot consumers that capture stills from a stable SD RTSP feed benefit from the same fix because the bridge keeps advertising the working native alias instead of briefly publishing the wrong stream target.
+- This is a narrow reliability patch for the `4.3` line; the broader Home Assistant startup, snapshot, SD-only, WHEP, and packaging hygiene changes remain from `4.3.2`.
+
 ## 4.3.2 Highlights
 
 - Home Assistant startup now waits for the authenticated camera catalog and semantic `/api/ready` state before claiming the add-on is ready, so an empty catalog can no longer wipe native `go2rtc` aliases during boot.
@@ -153,7 +159,7 @@ Full caveats, firmware notes, and public limitations live in [Camera Support](./
 ## Operational Notes
 
 - Current master-goal proof is split into safe local proof and live Home Assistant proof. Run `./scripts/run_master_local_gates.sh` for the non-live proof bundle: it checks the canonical app overlays, snapshot tests, packaging safety, WHEP proxy tests, the master status summary, and the Python suite.
-- Run `python3 scripts/master_goal_status.py` for the short scoreboard. For `4.3.2`, Phase 1 snapshots, Phase 2 startup/API, Phase 3 SD-only, and Phase 5 overlay/API have current green production proof; the strict Phase 4 soak still stays red when Frigate/Scrypted skipped-FPS blips occur.
+- Run `python3 scripts/master_goal_status.py` for the short scoreboard. For `4.3.3`, the release patch is scoped to SD-only native alias reliability; the broader `4.3.2` proof boundary still applies, with Phase 1 snapshots, Phase 2 startup/API, Phase 3 SD-only, and Phase 5 overlay/API green and the strict Phase 4 soak still red when Frigate/Scrypted skipped-FPS blips occur.
 - Run `./scripts/ha_bridge_doctor.sh` for a read-only live Home Assistant bridge check. It gathers add-on state, production health, redacted MediaMTX logs, host port clues, and Frigate FPS without stopping, rebuilding, rebooting, or printing secret option values.
 - After an explicitly approved live recovery action, run `./scripts/ha_prod_recovery_verify.sh` before resuming the remaining live gates. It is read-only and fails unless production health, recent logs, and Frigate FPS prove the bridge is recovered enough for the WHEP and production rebuild checks.
 - For the Phase 2 production startup/API proof after recovery, run `./scripts/ha_phase2_prod_startup_soak.sh`. It is read-only, uses the bridge API key as an `api` header, and fails if `/api` or `/api/ready` regress, the catalog is empty/loading, native RTSP URLs disappear, or recent logs still show catalog/alias errors or the `:58888` bind conflict.
