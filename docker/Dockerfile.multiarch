@@ -62,7 +62,13 @@ RUN set -eux; \
     tar tzf mediamtx.tar.gz || (echo "Invalid mediamtx tarball for ${MTX_ARCH}" && exit 1); \
     tar xzf mediamtx.tar.gz -C app; \
     rm mediamtx.tar.gz; \
-    GO2RTC_ARCH=$([ "${TARGETARCH}" = "arm64" ] && echo "arm64" || [ "${TARGETARCH}" = "arm" ] && echo "arm" || echo "amd64"); \
+    if [ "${TARGETARCH}" = "arm64" ]; then \
+        GO2RTC_ARCH=arm64; \
+    elif [ "${TARGETARCH}" = "arm" ]; then \
+        GO2RTC_ARCH=arm; \
+    else \
+        GO2RTC_ARCH=amd64; \
+    fi; \
     mkdir -p usr/local/bin; \
     curl -fsSL "https://github.com/AlexxIT/go2rtc/releases/download/v1.9.14/go2rtc_linux_${GO2RTC_ARCH}" -o usr/local/bin/go2rtc && echo "go2rtc downloaded OK"; \
     chmod +x usr/local/bin/go2rtc; \
