@@ -28,6 +28,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         curl \
         gcc \
         libffi-dev \
+        libjpeg62-turbo-dev \
+        zlib1g-dev \
         tar; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/*
