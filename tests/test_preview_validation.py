@@ -16,7 +16,11 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "app"))
 from wyzebridge.preview_validation import (  # noqa: E402
     preview_bytes_are_image,
     preview_bytes_are_valid_image,
+    preview_content_hash,
     preview_file_is_image,
+    preview_payload_matches_existing,
+    read_snapshot_hash_registry,
+    record_preview_hash,
 )
 
 
@@ -86,6 +90,22 @@ class TestPreviewValidation(unittest.TestCase):
             path = pathlib.Path(tmp) / "smeared.jpg"
             path.write_bytes(smeared_preview())
             self.assertFalse(preview_file_is_image(path))
+
+    @unittest.skipUnless(Image is not None, "Pillow is required for synthetic JPEG generation")
+    def test_snapshot_hash_registry_tracks_camera_content(self):
+        payload = coherent_preview()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "garage.jpg"
+            path.write_bytes(payload)
+
+            digest = record_preview_hash(path, payload, camera="garage", source="test")
+            registry = read_snapshot_hash_registry(tmp)
+
+            self.assertEqual(digest, preview_content_hash(payload))
+            self.assertTrue(preview_payload_matches_existing(path, payload))
+            self.assertEqual(registry["garage"]["sha256"], digest)
+            self.assertEqual(registry["garage"]["source"], "test")
 
 
 if __name__ == "__main__":

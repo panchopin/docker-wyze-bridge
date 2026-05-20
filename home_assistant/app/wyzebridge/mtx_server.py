@@ -25,6 +25,7 @@ from wyzebridge.logging import logger
 
 MTX_CONFIG: str = "/app/mediamtx.yml" if Path("/app").exists() else ".runtime/mediamtx.yml"
 MTX_PATH: str = "%path"
+WHEP_PROXY_PORT: str = os.getenv("WHEP_PROXY_PORT", "8080")
 MTX_ADDRESS_KEYS: dict[str, str] = {
     "apiAddress": "MTX_APIADDRESS",
     "hlsAddress": "MTX_HLSADDRESS",
@@ -195,7 +196,7 @@ class MtxServer:
         with MtxInterface() as mtx:
             if is_kvs:
                 on_demand = True
-                mtx.set(f"paths.{uri}.source", f"whep://127.0.0.1:8080/whep/{uri}")
+                mtx.set(f"paths.{uri}.source", f"whep://127.0.0.1:{WHEP_PROXY_PORT}/whep/{uri}")
                 mtx.set(f"paths.{uri}.sourceOnDemand", on_demand)
                 if on_demand:
                     mtx.set(f"paths.{uri}.sourceOnDemandStartTimeout", "30s")

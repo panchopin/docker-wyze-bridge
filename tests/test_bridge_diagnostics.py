@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "app"))
 
+import wyzebridge.bridge_diagnostics as bridge_diagnostics_module
 from wyzebridge.bridge_diagnostics import (
     DEFAULT_WHEP_PROXY_PORT,
     mediamtx_probe,
@@ -18,7 +19,7 @@ class TestBridgeDiagnostics(unittest.TestCase):
     @patch.dict(
         "os.environ", {"MTX_API": "true", "MTX_APIADDRESS": ":59997"}, clear=False
     )
-    @patch("wyzebridge.bridge_diagnostics.requests.get")
+    @patch.object(bridge_diagnostics_module.requests, "get")
     def test_mediamtx_probe_uses_local_api_address(self, mock_get):
         response = Mock()
         response.status_code = 200
@@ -37,7 +38,7 @@ class TestBridgeDiagnostics(unittest.TestCase):
         self.assertEqual(result["data"], {"name": "dog-run", "ready": True})
 
     @patch.dict("os.environ", {}, clear=True)
-    @patch("wyzebridge.bridge_diagnostics.requests.get")
+    @patch.object(bridge_diagnostics_module.requests, "get")
     def test_mediamtx_probe_reports_disabled_api(self, mock_get):
         result = mediamtx_probe("dog-run")
 
@@ -47,7 +48,7 @@ class TestBridgeDiagnostics(unittest.TestCase):
         self.assertIn("disabled", result["error"].lower())
 
     @patch.dict("os.environ", {"MTX_API": "true"}, clear=False)
-    @patch("wyzebridge.bridge_diagnostics.requests.get")
+    @patch.object(bridge_diagnostics_module.requests, "get")
     def test_mediamtx_probe_defaults_to_standard_port_when_api_enabled(self, mock_get):
         response = Mock()
         response.status_code = 200
@@ -63,7 +64,7 @@ class TestBridgeDiagnostics(unittest.TestCase):
         self.assertTrue(result["enabled"])
         self.assertTrue(result["reachable"])
 
-    @patch("wyzebridge.bridge_diagnostics.requests.get")
+    @patch.object(bridge_diagnostics_module.requests, "get")
     def test_whep_proxy_probe_targets_local_status_endpoint(self, mock_get):
         response = Mock()
         response.status_code = 200
@@ -80,7 +81,7 @@ class TestBridgeDiagnostics(unittest.TestCase):
         self.assertEqual(result["listener"], f"http://127.0.0.1:{DEFAULT_WHEP_PROXY_PORT}")
         self.assertEqual(result["data"], {"upstream_alive": True})
 
-    @patch("wyzebridge.bridge_diagnostics.requests.get")
+    @patch.object(bridge_diagnostics_module.requests, "get")
     def test_whep_proxy_probe_requires_stream(self, mock_get):
         result = whep_proxy_probe(None)
 

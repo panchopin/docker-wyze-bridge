@@ -1026,7 +1026,9 @@ document.addEventListener("DOMContentLoaded", () => {
       const meta = group.querySelector(
         `.stream-feed-meta[data-feed-meta="${feed}"]`,
       );
+      const hideFeed = !!config.sd_only && feed === "hd";
       if (button) {
+        button.hidden = hideFeed;
         const enabled = !!feedConfig.enabled;
         const supported = !!feedConfig.supported;
         button.disabled = !supported;
@@ -1035,6 +1037,8 @@ document.addEventListener("DOMContentLoaded", () => {
         button.classList.toggle("is-static", !supported);
       }
       if (input) {
+        const inputControl = input.closest(".control");
+        if (inputControl) inputControl.hidden = hideFeed;
         input.value = feedConfig.kbps || "";
         input.disabled = !feedConfig.supported;
       }

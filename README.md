@@ -15,6 +15,15 @@ Create local WebRTC, RTSP, RTMP, and HLS streams for Wyze cameras without custom
 - WebRTC/KVS-backed bridge path for modern Wyze models.
 - Native Home Assistant `go2rtc` RTSP sidecar on `:19554` for supported 4.3 workflows.
 
+## 4.3.2 Highlights
+
+- Home Assistant startup now waits for the authenticated camera catalog and semantic `/api/ready` state before claiming the add-on is ready, so an empty catalog can no longer wipe native `go2rtc` aliases during boot.
+- Snapshot refreshes now reject tiny, non-image, unchanged, and stale frames by content hash instead of trusting HTTP success or file timestamps.
+- `SD_ONLY=true` is now treated as an authoritative Home Assistant mode: one SD feed per camera, HD paths hidden or rejected, and only `*-sd` native aliases exposed in the production proof path.
+- The bundled WHEP proxy keeps recently healthy streams in a bounded recovering state during short reconnects, then recreates them if media does not return.
+- Release packaging now excludes local agent notes, scratch files, option payloads, SSH env files, and private SDK values from public artifacts.
+- Live proof is intentionally precise: Phase 1 snapshots, Phase 2 startup/API, Phase 3 SD-only, and Phase 5 overlay/API are green; the strict one-hour Phase 4 gate remains blocked by intermittent Frigate/Scrypted skipped-FPS blips even though WHEP media stayed ready through the hour.
+
 ## 4.3.1 Highlights
 
 - Cached preview files are now validated as real images before the bridge serves them, blocking zero-byte files, HTML/login responses saved as `.jpg`, and repeated vertical-smear corruption.
@@ -135,7 +144,7 @@ Full caveats, firmware notes, and public limitations live in [Camera Support](./
 
 ## Documentation
 
-- [4.2 Release Notes](./docs/user_guide/release_notes_v4.md)
+- [4.3 Release Notes](./docs/user_guide/release_notes_v4.md)
 - [Camera Support and Limits](./docs/user_guide/camera_support.md)
 - [Home Assistant Add-on Docs](./home_assistant/DOCS.md)
 - [Troubleshooting Guide](./docs/user_guide/troubleshooting.md)
@@ -143,6 +152,14 @@ Full caveats, firmware notes, and public limitations live in [Camera Support](./
 
 ## Operational Notes
 
+- Current master-goal proof is split into safe local proof and live Home Assistant proof. Run `./scripts/run_master_local_gates.sh` for the non-live proof bundle: it checks the canonical app overlays, snapshot tests, packaging safety, WHEP proxy tests, the master status summary, and the Python suite.
+- Run `python3 scripts/master_goal_status.py` for the short scoreboard. For `4.3.2`, Phase 1 snapshots, Phase 2 startup/API, Phase 3 SD-only, and Phase 5 overlay/API have current green production proof; the strict Phase 4 soak still stays red when Frigate/Scrypted skipped-FPS blips occur.
+- Run `./scripts/ha_bridge_doctor.sh` for a read-only live Home Assistant bridge check. It gathers add-on state, production health, redacted MediaMTX logs, host port clues, and Frigate FPS without stopping, rebuilding, rebooting, or printing secret option values.
+- After an explicitly approved live recovery action, run `./scripts/ha_prod_recovery_verify.sh` before resuming the remaining live gates. It is read-only and fails unless production health, recent logs, and Frigate FPS prove the bridge is recovered enough for the WHEP and production rebuild checks.
+- For the Phase 2 production startup/API proof after recovery, run `./scripts/ha_phase2_prod_startup_soak.sh`. It is read-only, uses the bridge API key as an `api` header, and fails if `/api` or `/api/ready` regress, the catalog is empty/loading, native RTSP URLs disappear, or recent logs still show catalog/alias errors or the `:58888` bind conflict.
+- For the Phase 4 live WHEP gate, use `HA_WHEP_SOAK_STREAMS="stream-one stream-two" ./scripts/ha_phase4_whep_soak.sh` after production recovery. The default run is one hour and stays read-only while checking production health, per-stream WHEP video readiness, audio packet sanity, Frigate FPS, and recent WHEP/bind-error logs.
+- For the Phase 5 production overlay/API proof after an approved overlay-built rebuild, run `./scripts/ha_phase5_prod_overlay_api_verify.sh`. It is read-only, confirms the local overlay build still matches, checks production Supervisor identity without printing raw option values, uses bridge API header auth, and fails if health, catalog readiness, native RTSP URLs, or recent logs still show the MediaMTX/WHEP blockers.
+- On the May 20, 2026 Home Assistant host, the active local production slot recovered and passed the snapshot, startup/API, SD-only, and overlay/API release checks. The remaining strict gate is not a WHEP media failure: the one-hour soak kept WHEP streams ready, but Frigate/Scrypted skipped-FPS blips still failed the zero-blip Phase 4 rule.
 - On the April 12, 2026 Home Assistant host audit, the HA core and LAN frontend remained healthy while the active remote path was a Cloudflare Access-protected hostname and Home Assistant's saved internal/external URLs still pointed at an older DuckDNS address. If the companion app shows a generic connection failure in this state, check URL drift and remote-auth gates before treating it as a server outage.
 - The same April 12 follow-up fixed that mismatch by setting Home Assistant `internal_url` to `http://192.168.1.244:8123` for LAN use and `external_url` to `https://ha.tokentradegames.com` for remote use through Cloudflare Access.
 - A separate April 12 Frigate outage on the same host turned out to be a stale Supervisor media-mount problem rather than bad Frigate camera config. Reloading the `frigate` network mount and then starting the add-on restored Frigate to a healthy `started` state with live `/api/stats` camera fps again.

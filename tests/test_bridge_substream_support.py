@@ -12,6 +12,11 @@ sys.path.insert(
     0, str(pathlib.Path(__file__).resolve().parent.parent / ".ha_live_addon" / "app")
 )
 
+if not hasattr(sys.modules.get("wyzebridge.wyze_stream"), "StreamStatus"):
+    for module_name in list(sys.modules):
+        if module_name == "wyzebridge" or module_name.startswith("wyzebridge."):
+            del sys.modules[module_name]
+
 sys.modules.setdefault("xxtea", types.ModuleType("xxtea"))
 
 fake_wyzecam_iotc = types.ModuleType("wyzecam.iotc")

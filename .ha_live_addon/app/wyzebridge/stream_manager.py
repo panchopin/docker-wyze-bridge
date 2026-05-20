@@ -14,7 +14,11 @@ from wyzebridge.go2rtc import native_alias, preload_native_stream, write_native_
 from wyzebridge.logging import logger
 from wyzebridge.mqtt import bridge_status, cam_control, publish_topic, update_preview
 from wyzebridge.mtx_event import RtspEvent
-from wyzebridge.preview_validation import preview_file_is_image
+from wyzebridge.preview_validation import (
+    preview_file_is_image,
+    preview_payload_matches_existing,
+    record_preview_hash,
+)
 from wyzebridge.wyze_events import WyzeEvents
 from wyzebridge.bridge_utils_sunset import should_take_snapshot, should_skip_snapshot
 
@@ -30,12 +34,38 @@ def _snapshot_decode_failed(stderr_output: bytes | None) -> bool:
 
 
 def _snapshot_matches_existing(temp_path: str, final_path: str) -> bool:
-    if not os.path.exists(final_path):
-        return False
     try:
-        with open(temp_path, "rb") as temp_file, open(final_path, "rb") as final_file:
-            return temp_file.read() == final_file.read()
+        with open(temp_path, "rb") as temp_file:
+            return preview_payload_matches_existing(final_path, temp_file.read())
     except OSError:
+        return False
+
+
+def _finalize_snapshot_output(
+    cam_name: str,
+    temp_path: str,
+    final_path: str,
+    stderr_output: bytes | None,
+) -> bool:
+    try:
+        if os.path.getsize(temp_path) <= 0:
+            return False
+        if not preview_file_is_image(temp_path):
+            logger.warning(f"❗ [{cam_name}] Snapshot output was not a valid image; keeping previous preview")
+            return False
+        if _snapshot_decode_failed(stderr_output):
+            logger.warning(f"❗ [{cam_name}] Snapshot decode failed; keeping previous preview")
+            return False
+        with open(temp_path, "rb") as temp_file:
+            payload = temp_file.read()
+        if preview_payload_matches_existing(final_path, payload):
+            logger.warning(f"❗ [{cam_name}] Snapshot matched existing preview; treating as stale")
+            return False
+        os.replace(temp_path, final_path)
+        record_preview_hash(final_path, payload, camera=cam_name, source="rtsp")
+        return True
+    except OSError as ex:
+        logger.error(f"❗ [{cam_name}] [{type(ex).__name__}] {ex}")
         return False
 
 
@@ -144,7 +174,15 @@ class StreamManager:
                             and (returncode := ffmpeg.returncode) is not None
                         ):
                             if returncode == 0:
-                                update_preview(cam)
+                                stderr_output = b""
+                                with contextlib.suppress(Exception):
+                                    _, stderr_output = ffmpeg.communicate(timeout=0.1)
+                                temp_path = getattr(ffmpeg, "_wyze_snapshot_temp_path", "")
+                                final_path = getattr(ffmpeg, "_wyze_snapshot_final_path", "")
+                                if temp_path and final_path and _finalize_snapshot_output(
+                                    cam, temp_path, final_path, stderr_output
+                                ):
+                                    update_preview(cam)
                             # we have some response, remove from queue
                             self.remove_from_rtsp_snapshots(cam)
                     time.sleep(1)
@@ -236,7 +274,16 @@ class StreamManager:
             self.snap_all(force=True)
             return resp | {"status": "success"}
 
-        if not (stream := self.get(cam_name)):
+        stream = self.get(cam_name)
+        if cmd == "update_snapshot" and not stream:
+            if not self.api.get_camera(cam_name):
+                return resp | {"response": "Camera not found"}
+
+            snapshot = self.refresh_preview(cam_name)["ok"]
+            publish_topic(f"{cam_name}/{cmd}", int(time.time()) if snapshot else 0)
+            return dict(resp, status="success", value=snapshot, response=snapshot)
+
+        if not stream:
             return resp | {"response": "Camera not found"}
 
         if cam_resp := stream.send_cmd(cmd, payload):
@@ -264,8 +311,15 @@ class StreamManager:
         stream.start()
         ffmpeg = self.rtsp_snapshots.get(cam_name)
         if not ffmpeg or ffmpeg.poll() is not None:
-            # None means inherit from parent process
-            ffmpeg = Popen(rtsp_snap_cmd(cam_name, interval), stderr=None)
+            cmd = rtsp_snap_cmd(cam_name, interval)
+            final_path = cmd[-1]
+            temp_path = f"{final_path}.tmp"
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(temp_path)
+            cmd[-1] = temp_path
+            ffmpeg = Popen(cmd, stderr=PIPE)
+            setattr(ffmpeg, "_wyze_snapshot_temp_path", temp_path)
+            setattr(ffmpeg, "_wyze_snapshot_final_path", final_path)
             self.rtsp_snapshots[cam_name] = ffmpeg
         return ffmpeg
 
@@ -290,17 +344,11 @@ class StreamManager:
             try:
                 _, stderr_output = ffmpeg.communicate(timeout=snapshot_timeout)
                 if ffmpeg.returncode == 0 and os.path.getsize(temp_path) > 0:
-                    if not preview_file_is_image(temp_path):
-                        logger.warning(f"❗ [{cam_name}] Snapshot output was not a valid image; keeping previous preview")
-                        return False
-                    if _snapshot_decode_failed(stderr_output):
-                        logger.warning(f"❗ [{cam_name}] Snapshot decode failed; keeping previous preview")
-                        return False
-                    if _snapshot_matches_existing(temp_path, final_path):
-                        logger.warning(f"❗ [{cam_name}] Snapshot matched existing preview; treating as stale")
-                        return False
-                    os.replace(temp_path, final_path)
-                    return True
+                    if _finalize_snapshot_output(
+                        cam_name, temp_path, final_path, stderr_output
+                    ):
+                        return True
+                    return False
             except TimeoutExpired:
                 timed_out = True
                 suffix = " without frame skip" if not skip_early_frames else ""
@@ -325,7 +373,10 @@ class StreamManager:
             alternate_alias = native_alias(cam_name, substream=True)
             if alternate_alias not in aliases:
                 aliases.append(alternate_alias)
-            return any(write_native_snapshot(alias, cam_name) for alias in aliases)
+            return any(
+                write_native_snapshot(alias, cam_name, warn_on_failure=False)
+                for alias in aliases
+            )
         info = stream.get_info()
         if require_selected and not info.get("native_selected"):
             return False
@@ -334,11 +385,23 @@ class StreamManager:
         alias = info.get("native_alias")
         if not alias:
             return False
-        if alias not in self.native_preloads:
-            preload = preload_native_stream(alias)
-            if preload.get("ok"):
-                self.native_preloads.add(alias)
-        return write_native_snapshot(alias, cam_name)
+        aliases = [alias]
+        if not require_selected:
+            alternate_alias = native_alias(cam_name, substream=True)
+            if alternate_alias not in aliases:
+                aliases.append(alternate_alias)
+        for candidate_alias in aliases:
+            if candidate_alias not in self.native_preloads:
+                preload = preload_native_stream(candidate_alias)
+                if preload.get("ok"):
+                    self.native_preloads.add(candidate_alias)
+            if write_native_snapshot(
+                candidate_alias,
+                cam_name,
+                warn_on_failure=require_selected and candidate_alias == alias,
+            ):
+                return True
+        return False
 
     def get_snapshot(self, cam_name: str) -> dict:
         if self._go2rtc_snapshot(cam_name, require_selected=True):

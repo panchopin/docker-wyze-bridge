@@ -11,6 +11,7 @@ sys.path.insert(
 )
 
 from wyzecam.api_models import WyzeCamera
+import wyzebridge.wyze_api as wyze_api_module
 from wyzebridge.wyze_api import WHEP_PROXY_PORT, WyzeApi
 
 
@@ -70,7 +71,7 @@ class TestKVSSubstreamProxyConfig(unittest.TestCase):
         with (
             patch.object(WyzeApi, "get_camera", return_value=camera) as get_camera,
             patch.object(WyzeApi, "_maybe_wake_kvs_camera"),
-            patch("wyzebridge.wyze_api.get_camera_stream", return_value=FakeStream()),
+            patch.object(wyze_api_module, "get_camera_stream", return_value=FakeStream()),
         ):
             config = self.api.get_kvs_proxy_config("north-yard-sub")
 
@@ -82,12 +83,54 @@ class TestKVSSubstreamProxyConfig(unittest.TestCase):
         self.assertEqual(config["phone_id"], "phone-123")
         self.assertEqual(config["signaling_url"], "wss://signal.example/ws?camera=north-yard")
 
+    def test_hl_bc_main_path_proxy_config_uses_sd_quality(self):
+        camera = make_camera("HL_BC", "South Yard")
+        signal = {
+            "signalingUrl": "wss://signal.example/ws?camera=south-yard",
+            "signalToken": "token-abc",
+            "ClientId": "phone-abc",
+            "servers": [],
+        }
+
+        with (
+            patch.object(WyzeApi, "get_camera", return_value=camera) as get_camera,
+            patch.object(WyzeApi, "_maybe_wake_kvs_camera"),
+            patch.object(wyze_api_module, "get_cam_webrtc", return_value=signal),
+        ):
+            config = self.api.get_kvs_proxy_config("south-yard")
+
+        get_camera.assert_called_with("south-yard", True)
+        self.assertEqual(config["camera_name"], "south-yard")
+        self.assertEqual(config["stream_id"], "south-yard")
+        self.assertEqual(config["quality"], "sd30")
+        self.assertFalse(config["substream"])
+        self.assertEqual(config["phone_id"], "phone-abc")
+
+    def test_hl_bc_main_path_wakes_camera_before_proxy_config(self):
+        camera = make_camera("HL_BC", "South Yard")
+        signal = {
+            "signalingUrl": "wss://signal.example/ws?camera=south-yard",
+            "signalToken": "token-abc",
+            "ClientId": "phone-abc",
+            "servers": [],
+        }
+
+        with (
+            patch.object(WyzeApi, "get_camera", return_value=camera),
+            patch.object(wyze_api_module, "wakeup_kvs_camera") as wakeup,
+            patch.object(wyze_api_module, "get_cam_webrtc", return_value=signal),
+        ):
+            config = self.api.get_kvs_proxy_config("south-yard")
+
+        self.assertEqual(config["stream_id"], "south-yard")
+        wakeup.assert_called_once_with(self.api.auth, camera)
+
     def test_setup_mtx_proxy_posts_substream_uri(self):
         kvs_config = {"signaling_url": "wss://signal.example/ws", "stream_id": "north-yard-sub"}
 
         with (
             patch.object(WyzeApi, "get_kvs_proxy_config", return_value=kvs_config) as get_kvs_proxy_config,
-            patch("wyzebridge.wyze_api.requests.post", return_value=FakeResponse()) as post,
+            patch.object(wyze_api_module.requests, "post", return_value=FakeResponse()) as post,
             patch("wyzebridge.wyze_api.requests.get", return_value=FakeResponse()),
         ):
             result = self.api.setup_mtx_proxy("north-yard-sub")

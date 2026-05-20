@@ -77,6 +77,7 @@ def load_wyze_api_module(token_path: str):
     requests_module.get = lambda *args, **kwargs: None
     requests_module.post = lambda *args, **kwargs: None
     requests_module.HTTPError = FakeHTTPError
+    requests_module.Response = object
 
     requests_exceptions = types.ModuleType("requests.exceptions")
     requests_exceptions.ConnectionError = FakeConnectionError

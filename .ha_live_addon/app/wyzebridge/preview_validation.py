@@ -1,6 +1,11 @@
+import hashlib
+import json
+import time
 from io import BytesIO
 from pathlib import Path
 from statistics import mean, pstdev
+
+SNAPSHOT_HASH_REGISTRY = ".snapshot_hashes.json"
 
 
 def preview_bytes_are_image(payload: bytes) -> bool:
@@ -61,3 +66,75 @@ def preview_file_is_image(path: str | Path) -> bool:
             return preview_bytes_are_valid_image(handle.read())
     except OSError:
         return False
+
+
+def preview_content_hash(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def preview_file_hash(path: str | Path) -> str | None:
+    try:
+        with Path(path).open("rb") as handle:
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+            return digest.hexdigest()
+    except OSError:
+        return None
+
+
+def preview_payload_matches_existing(path: str | Path, payload: bytes) -> bool:
+    existing_hash = preview_file_hash(path)
+    return existing_hash is not None and existing_hash == preview_content_hash(payload)
+
+
+def snapshot_hash_registry_path(img_dir: str | Path) -> Path:
+    return Path(img_dir) / SNAPSHOT_HASH_REGISTRY
+
+
+def read_snapshot_hash_registry(img_dir: str | Path) -> dict:
+    try:
+        data = json.loads(snapshot_hash_registry_path(img_dir).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def snapshot_hash_entry(img_dir: str | Path, camera: str) -> dict:
+    entry = read_snapshot_hash_registry(img_dir).get(camera, {})
+    return entry if isinstance(entry, dict) else {}
+
+
+def record_preview_hash(
+    path: str | Path,
+    payload: bytes | None = None,
+    *,
+    camera: str | None = None,
+    source: str = "",
+) -> str | None:
+    snapshot_path = Path(path)
+    try:
+        content = payload if payload is not None else snapshot_path.read_bytes()
+    except OSError:
+        return None
+
+    digest = preview_content_hash(content)
+    registry_path = snapshot_hash_registry_path(snapshot_path.parent)
+    registry = read_snapshot_hash_registry(snapshot_path.parent)
+    registry[camera or snapshot_path.stem] = {
+        "sha256": digest,
+        "bytes": len(content),
+        "source": source,
+        "recorded_at": int(time.time()),
+    }
+
+    try:
+        tmp_path = registry_path.with_name(registry_path.name + ".tmp")
+        tmp_path.write_text(
+            json.dumps(registry, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        tmp_path.replace(registry_path)
+    except OSError:
+        return digest
+    return digest

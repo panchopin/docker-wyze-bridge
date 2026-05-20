@@ -11,10 +11,18 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 
+CALLER_DEV_ADDON_SLUG=${HA_DEV_ADDON_SLUG-}
+CALLER_PROD_ADDON_SLUG=${HA_PROD_ADDON_SLUG-}
+CALLER_FRIGATE_ADDON_SLUG=${HA_FRIGATE_ADDON_SLUG-}
+
 if [ -f "$SCRIPT_DIR/.ha_ssh.env" ]; then
   # shellcheck disable=SC1091
   . "$SCRIPT_DIR/.ha_ssh.env"
 fi
+
+[ -n "$CALLER_DEV_ADDON_SLUG" ] && HA_DEV_ADDON_SLUG=$CALLER_DEV_ADDON_SLUG
+[ -n "$CALLER_PROD_ADDON_SLUG" ] && HA_PROD_ADDON_SLUG=$CALLER_PROD_ADDON_SLUG
+[ -n "$CALLER_FRIGATE_ADDON_SLUG" ] && HA_FRIGATE_ADDON_SLUG=$CALLER_FRIGATE_ADDON_SLUG
 
 DEV_SLUG="${HA_DEV_ADDON_SLUG:-docker_wyze_bridge_dev}"
 PROD_SLUG="${HA_PROD_ADDON_SLUG:-docker_wyze_bridge_v4}"
@@ -22,20 +30,20 @@ FRIGATE_SLUG="${HA_FRIGATE_ADDON_SLUG:-ccab4aaf_frigate}"
 PROD_INFO_FILE="$REPO_DIR/.orig_addon_info.json"
 DEV_WEB_PORT="${HA_DEV_WEB_PORT:-55000}"
 DEV_WHEP_PROXY_PORT="${HA_DEV_WHEP_PROXY_PORT:-18080}"
-DEV_RTSP_PORT="${HA_DEV_RTSP_PORT:-59554}"
-DEV_HLS_PORT="${HA_DEV_HLS_PORT:-59888}"
-DEV_WEBRTC_PORT="${HA_DEV_WEBRTC_PORT:-59889}"
-DEV_WEBRTC_UDP_PORT="${HA_DEV_WEBRTC_UDP_PORT:-59189}"
-DEV_RTP_PORT="${HA_DEV_RTP_PORT:-59000}"
-DEV_RTCP_PORT="${HA_DEV_RTCP_PORT:-59001}"
-DEV_RTMP_PORT="${HA_DEV_RTMP_PORT:-52935}"
-DEV_RTMPS_PORT="${HA_DEV_RTMPS_PORT:-52936}"
-DEV_RTSPS_PORT="${HA_DEV_RTSPS_PORT:-59322}"
-DEV_SRT_PORT="${HA_DEV_SRT_PORT:-59890}"
-DEV_PLAYBACK_PORT="${HA_DEV_PLAYBACK_PORT:-60996}"
-DEV_API_PORT="${HA_DEV_API_PORT:-60997}"
-DEV_METRICS_PORT="${HA_DEV_METRICS_PORT:-60998}"
-DEV_PPROF_PORT="${HA_DEV_PPROF_PORT:-60999}"
+DEV_RTSP_PORT="${HA_DEV_RTSP_PORT:-28554}"
+DEV_HLS_PORT="${HA_DEV_HLS_PORT:-28888}"
+DEV_WEBRTC_PORT="${HA_DEV_WEBRTC_PORT:-28889}"
+DEV_WEBRTC_UDP_PORT="${HA_DEV_WEBRTC_UDP_PORT:-28189}"
+DEV_RTP_PORT="${HA_DEV_RTP_PORT:-28000}"
+DEV_RTCP_PORT="${HA_DEV_RTCP_PORT:-28001}"
+DEV_RTMP_PORT="${HA_DEV_RTMP_PORT:-21935}"
+DEV_RTMPS_PORT="${HA_DEV_RTMPS_PORT:-21936}"
+DEV_RTSPS_PORT="${HA_DEV_RTSPS_PORT:-28322}"
+DEV_SRT_PORT="${HA_DEV_SRT_PORT:-28890}"
+DEV_PLAYBACK_PORT="${HA_DEV_PLAYBACK_PORT:-29996}"
+DEV_API_PORT="${HA_DEV_API_PORT:-29997}"
+DEV_METRICS_PORT="${HA_DEV_METRICS_PORT:-29998}"
+DEV_PPROF_PORT="${HA_DEV_PPROF_PORT:-29999}"
 
 usage() {
   cat <<EOF
@@ -54,6 +62,7 @@ Commands:
 Environment overrides:
   HA_DEV_ADDON_SLUG   default: $DEV_SLUG
   HA_PROD_ADDON_SLUG  default: $PROD_SLUG
+  HA_DEV_SD_ONLY      when set to true/false, overrides SD_ONLY only for the dev add-on
 EOF
 }
 
@@ -220,6 +229,10 @@ addon_installed() {
   installed=$(addon_field "$1" installed 2>/dev/null || printf '')
   version=$(addon_field "$1" version 2>/dev/null || printf '')
   [ "$installed" = "True" ] || [ "$installed" = "true" ] || [ -n "$version" ]
+}
+
+bridge_slots_summary() {
+  "$SCRIPT_DIR/ha_ssh.sh" 'ha apps --raw-json 2>/dev/null | jq -r ".data.addons[]? | select((.slug|test(\"wyze|bridge\";\"i\")) or (.name|test(\"wyze|bridge\";\"i\"))) | [.slug,.name,.state,.repository,.version] | @tsv"' 2>/dev/null || true
 }
 
 wait_for_addon_state() {
@@ -465,6 +478,7 @@ copy_prod_options() {
   DEV_SRT_PORT="$DEV_SRT_PORT" \
   DEV_WEBRTC_PORT="$DEV_WEBRTC_PORT" \
   DEV_WEBRTC_UDP_PORT="$DEV_WEBRTC_UDP_PORT" \
+  HA_DEV_SD_ONLY="${HA_DEV_SD_ONLY:-}" \
   python3 - "$PROD_INFO_FILE" >"$payload_file" <<'PY'
 import json
 import os
@@ -519,6 +533,12 @@ for hidden_key in (
 ):
     payload.pop(hidden_key, None)
 
+dev_sd_only = os.environ.get("HA_DEV_SD_ONLY", "").strip().lower()
+if dev_sd_only:
+    if dev_sd_only not in {"1", "true", "yes", "on", "0", "false", "no", "off"}:
+        raise SystemExit("HA_DEV_SD_ONLY must be true or false when set.")
+    payload["SD_ONLY"] = dev_sd_only in {"1", "true", "yes", "on"}
+
 json.dump({"options": payload}, sys.stdout, separators=(",", ":"))
 PY
   remote_supervisor_post_json_file "/addons/$DEV_SLUG/options" "$payload_file" >/dev/null
@@ -548,6 +568,13 @@ Dev:
   installed: $dev_installed
   state: $dev_state
 EOF
+  bridge_slots=$(bridge_slots_summary)
+  if [ -n "$bridge_slots" ]; then
+    cat <<EOF
+All bridge-like add-ons:
+$bridge_slots
+EOF
+  fi
 }
 
 smoke_check() {

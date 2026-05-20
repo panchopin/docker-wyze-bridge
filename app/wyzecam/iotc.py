@@ -4,13 +4,15 @@ import contextlib
 import enum
 import errno
 import hashlib
+import json
 import logging
 import os
 import pathlib
+import threading
 import time
 import warnings
 from ctypes import CDLL, c_int, c_ubyte, c_uint16, c_uint, c_uint32
-from typing import Iterator, Optional, Tuple, Union
+from typing import Callable, Iterator, Optional, Tuple, Union
 
 from wyzebridge.config import CONNECT_TIMEOUT, FORCE_IOTC_DETAIL, LLHLS, SDK_KEY
 from wyzecam.api_models import WyzeAccount, WyzeCamera
@@ -24,6 +26,90 @@ from wyzecam.tutk.tutk_protocol import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _hl_cam4_main_probe_mode() -> str:
+    mode = os.getenv("HL_CAM4_MAIN_PROBE_MODE", "kvs").strip().lower()
+    return mode if mode in {"kvs", "tutk_dtls", "tutk_parallel"} else "kvs"
+
+
+def _tutk_trace_enabled(camera: WyzeCamera) -> bool:
+    raw = os.getenv("TUTK_TRACE_STREAM", "").strip().lower()
+    if not raw:
+        return False
+
+    targets = {item.strip() for item in raw.split(",") if item.strip()}
+    return "all" in targets or camera.name_uri in targets
+
+
+def _log_tutk_trace(camera: WyzeCamera, event: str, **fields) -> None:
+    raw = os.getenv("TUTK_TRACE_STREAM", "").strip().lower()
+    enabled = _tutk_trace_enabled(camera)
+    if event == "connect_start":
+        print(
+            f"[TUTK_TRACE_GATE] raw={raw!r} camera={camera.name_uri} enabled={enabled}",
+            flush=True,
+        )
+    if not enabled:
+        return
+
+    payload = {"camera": camera.name_uri, "event": event} | fields
+    trace = f"[TUTK_TRACE] {json.dumps(payload, sort_keys=True)}"
+    logger.info(trace)
+    print(trace, flush=True)
+
+
+def _hl_cam4_connect_watchdog_secs() -> Optional[float]:
+    raw = os.getenv("HL_CAM4_CONNECT_WATCHDOG_SECS", "").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return None
+    if raw:
+        try:
+            return max(float(raw), 0.1)
+        except ValueError:
+            logger.warning(
+                "[IOTC] Ignoring invalid HL_CAM4_CONNECT_WATCHDOG_SECS=%r", raw
+            )
+            return None
+    return float(CONNECT_TIMEOUT + 2)
+
+
+def _truthy_env(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _configure_tutk_native_log(tutk_platform_lib: CDLL) -> None:
+    if not _truthy_env("TUTK_NATIVE_LOG"):
+        return
+
+    log_path = (
+        os.getenv("TUTK_NATIVE_LOG_PATH", "/tmp/tutk_iotc.log").strip()
+        or "/tmp/tutk_iotc.log"
+    )
+    level_raw = os.getenv("TUTK_NATIVE_LOG_LEVEL", "0").strip()
+    try:
+        log_level = max(int(level_raw), 0)
+    except ValueError:
+        logger.warning("[TUTK] Ignoring invalid TUTK_NATIVE_LOG_LEVEL=%r", level_raw)
+        log_level = 0
+
+    try:
+        pathlib.Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+    except OSError as ex:
+        print(
+            f"[TUTK_NATIVE_LOG] mkdir_failed path={log_path} error={type(ex).__name__}: {ex}",
+            flush=True,
+        )
+
+    errno = tutk.iotc_set_log_attr(
+        tutk_platform_lib,
+        log_path,
+        c_uint32(log_level),
+    )
+    print(
+        f"[TUTK_NATIVE_LOG] path={log_path} level={log_level} errno={errno}",
+        flush=True,
+    )
 
 
 class WyzeIOTC:
@@ -77,6 +163,8 @@ class WyzeIOTC:
             path = pathlib.Path(tutk_platform_lib)
             tutk_platform_lib = tutk.load_library(str(path.absolute()))
 
+        _configure_tutk_native_log(tutk_platform_lib)
+
         if not sdk_key:
             sdk_key = SDK_KEY
 
@@ -129,7 +217,6 @@ class WyzeIOTC:
 
         self.max_num_av_channels = actual_num_chans
         atexit.register(self.deinitialize)
-        print(f"[DEBUG-IOTC] TUTK version: {self.version}", flush=True)
         print(
             f"[DEBUG-IOTC] TUTK initialized OK, max channels: {actual_num_chans}",
             flush=True,
@@ -306,6 +393,7 @@ class WyzeIOTCSession:
         self.frame_ts: float = 0.0
         self.substream: bool = substream
         self._sleep_buffer: float = 0.0
+        self._connect_watchdog_fired: bool = False
 
     @property
     def resolution(self) -> str:
@@ -717,6 +805,95 @@ class WyzeIOTCSession:
 
         raise RuntimeError("Unable to identify audio.")
 
+    def _connect_watchdog_timeout(self) -> Optional[float]:
+        if self.camera.product_model != "HL_CAM4":
+            return None
+
+        if not (self.substream or _hl_cam4_main_probe_mode() in {"tutk_dtls", "tutk_parallel"}):
+            return None
+
+        return _hl_cam4_connect_watchdog_secs()
+
+    def _arm_connect_watchdog(
+        self, connect_mode: str
+    ) -> tuple[Optional[threading.Timer], threading.Event]:
+        connect_done = threading.Event()
+        self._connect_watchdog_fired = False
+        timeout_s = self._connect_watchdog_timeout()
+        if timeout_s is None or self.session_id is None:
+            return None, connect_done
+
+        _log_tutk_trace(
+            self.camera,
+            "connect_watchdog_armed",
+            connect_mode=connect_mode,
+            substream=self.substream,
+            watchdog_timeout_s=round(timeout_s, 3),
+        )
+
+        def stop_connect() -> None:
+            if connect_done.is_set() or self.session_id is None:
+                return
+
+            print(
+                f"[DEBUG-IOTC] Connect watchdog firing after {timeout_s:.3f}s for {self.camera.nickname}",
+                flush=True,
+            )
+            self._connect_watchdog_fired = True
+            _log_tutk_trace(
+                self.camera,
+                "connect_watchdog_timeout",
+                connect_mode=connect_mode,
+                substream=self.substream,
+                watchdog_timeout_s=round(timeout_s, 3),
+            )
+            err_no = tutk.iotc_connect_stop_by_session_id(
+                self.tutk_platform_lib, self.session_id
+            )
+            _log_tutk_trace(
+                self.camera,
+                "connect_watchdog_stop",
+                connect_mode=connect_mode,
+                errno=int(err_no),
+                substream=self.substream,
+            )
+            print(
+                f"[DEBUG-IOTC] Connect watchdog stop returned {int(err_no)} for {self.camera.nickname}",
+                flush=True,
+            )
+
+        watchdog = threading.Timer(timeout_s, stop_connect)
+        watchdog.daemon = True
+        watchdog.start()
+        return watchdog, connect_done
+
+    def _release_connect_watchdog(
+        self,
+        watchdog: Optional[threading.Timer],
+        connect_done: threading.Event,
+    ) -> None:
+        connect_done.set()
+        if not watchdog:
+            return
+
+        watchdog.cancel()
+        with contextlib.suppress(RuntimeError):
+            watchdog.join(timeout=0.1)
+
+    def _run_connect_with_watchdog(
+        self, connect_mode: str, connect_call: Callable[[], int]
+    ) -> int:
+        watchdog, connect_done = self._arm_connect_watchdog(connect_mode)
+        try:
+            return connect_call()
+        finally:
+            self._release_connect_watchdog(watchdog, connect_done)
+
+    def _retryable_connect_error(self, ex: tutk.TutkError) -> bool:
+        if ex.code in {-13, -23}:
+            return True
+        return ex.code == -27 and self._connect_watchdog_fired
+
     def _connect(
         self,
         timeout_secs: c_uint32 = c_uint32(20),
@@ -732,16 +909,22 @@ class WyzeIOTCSession:
         for attempt in range(max_retries):
             try:
                 self._connect_attempt(
-                    timeout_secs, channel_id, username, password, max_buf_size
+                    timeout_secs,
+                    channel_id,
+                    username,
+                    password,
+                    max_buf_size,
+                    attempt_no=attempt + 1,
+                    max_retries=max_retries,
                 )
                 return
             except tutk.TutkError as ex:
                 last_error = ex
-                if ex.code not in {-13, -23} or attempt == max_retries - 1:
+                if not self._retryable_connect_error(ex) or attempt == max_retries - 1:
                     raise
 
                 logger.warning(
-                    f"[IOTC] Connection timed out for {self.camera.nickname}; retrying {attempt + 2}/{max_retries} in {retry_delay:.1f}s"
+                    f"[IOTC] Connection failed for {self.camera.nickname} with {ex.code}; retrying {attempt + 2}/{max_retries} in {retry_delay:.1f}s"
                 )
                 self._disconnect()
                 time.sleep(retry_delay)
@@ -756,6 +939,8 @@ class WyzeIOTCSession:
         username: str = "admin",
         password: str = "888888",
         max_buf_size: c_uint = c_uint(10 * 1024 * 1024),
+        attempt_no: int = 1,
+        max_retries: int = 1,
     ):
         try:
             self.state = WyzeIOTCSessionState.IOTC_CONNECTING
@@ -777,22 +962,40 @@ class WyzeIOTCSession:
             print(f"[DEBUG-IOTC] Got session ID: {session_id}", flush=True)
 
             force_v4_parallel_raw = os.getenv("FORCE_V4_PARALLEL", "")
+            probe_mode = _hl_cam4_main_probe_mode()
             force_parallel_substream = self.substream and self.camera.product_model in {
                 "HL_CAM3P",
                 "HL_CAM4",
             }
             force_v4_parallel = (
                 self.camera.product_model == "HL_CAM4"
-                and force_v4_parallel_raw.lower() in {"1", "true", "yes"}
+                and (
+                    probe_mode == "tutk_parallel"
+                    or force_v4_parallel_raw.lower() in {"1", "true", "yes"}
+                )
             )
             print(
                 f"[DEBUG-IOTC] FORCE_V4_PARALLEL raw='{force_v4_parallel_raw}' active={force_v4_parallel or force_parallel_substream}",
                 flush=True,
             )
+            _log_tutk_trace(
+                self.camera,
+                "connect_start",
+                attempt_no=attempt_no,
+                av_chan_id=None,
+                dtls=self.camera.dtls,
+                force_v4_parallel=force_v4_parallel or force_parallel_substream,
+                max_retries=max_retries,
+                main_probe_mode=probe_mode,
+                parent_dtls=self.camera.parent_dtls,
+                session_id=int(self.session_id),
+                substream=self.substream,
+            )
 
             if force_parallel_substream or force_v4_parallel or (
                 not self.camera.dtls and not self.camera.parent_dtls
             ):
+                connect_mode = "parallel"
                 print(
                     "[DEBUG-IOTC] Using IOTC_Connect_ByUID_Parallel"
                     + (
@@ -805,44 +1008,55 @@ class WyzeIOTCSession:
                     flush=True,
                 )
                 connect_started = time.monotonic()
-                session_id = tutk.iotc_connect_by_uid_parallel(
-                    self.tutk_platform_lib, self.camera.p2p_id, self.session_id
+                session_id = self._run_connect_with_watchdog(
+                    connect_mode,
+                    lambda: tutk.iotc_connect_by_uid_parallel(
+                        self.tutk_platform_lib, self.camera.p2p_id, self.session_id
+                    ),
                 )
                 print(
                     f"[DEBUG-IOTC] iotc_connect_by_uid_parallel elapsed={time.monotonic() - connect_started:.3f}s",
                     flush=True,
                 )
             else:
-                auth_key = self.get_auth_key()
-                enr = (
-                    str(self.camera.parent_enr)
-                    if self.camera.parent_dtls
-                    else str(self.camera.enr)
-                )
+                connect_mode = "dtls_ex"
                 print(
                     f"[DEBUG-IOTC] Using IOTC_Connect_ByUIDEx (DTLS={self.camera.dtls})",
                     flush=True,
                 )
-                password = enr
-                print(
-                    "[DEBUG-IOTC] Ex auth context: "
-                    f"enr_len={len(enr)} auth_key={auth_key[:2]}***{auth_key[-2:]} "
-                    f"parent_dtls={self.camera.parent_dtls}",
-                    flush=True,
+                password = (
+                    str(self.camera.parent_enr)
+                    if self.camera.parent_dtls
+                    else str(self.camera.enr)
                 )
                 print("[DEBUG-IOTC] Calling iotc_connect_by_uid_ex...", flush=True)
                 connect_started = time.monotonic()
-                session_id = tutk.iotc_connect_by_uid_ex(
-                    self.tutk_platform_lib,
-                    self.camera.p2p_id,
-                    self.session_id,
-                    auth_key,
-                    self.connect_timeout,
+                session_id = self._run_connect_with_watchdog(
+                    connect_mode,
+                    lambda: tutk.iotc_connect_by_uid_ex(
+                        self.tutk_platform_lib,
+                        self.camera.p2p_id,
+                        self.session_id,
+                        self.get_auth_key(),
+                        self.connect_timeout,
+                    ),
                 )
                 print(
                     f"[DEBUG-IOTC] iotc_connect_by_uid_ex elapsed={time.monotonic() - connect_started:.3f}s",
                     flush=True,
                 )
+            connect_elapsed = round(time.monotonic() - connect_started, 3)
+            _log_tutk_trace(
+                self.camera,
+                "connect_result",
+                attempt_no=attempt_no,
+                connect_mode=connect_mode,
+                elapsed_s=connect_elapsed,
+                max_retries=max_retries,
+                session_id=int(session_id),
+                substream=self.substream,
+                watchdog_fired=self._connect_watchdog_fired,
+            )
 
             print(f"[DEBUG-IOTC] Connect returned: {session_id}", flush=True)
             if int(session_id) < 0:
@@ -859,6 +1073,12 @@ class WyzeIOTCSession:
             print(
                 f"[DEBUG-IOTC] Session mode: {session_info.mode} (0=P2P, 1=Relay, 2=LAN)",
                 flush=True,
+            )
+            _log_tutk_trace(
+                self.camera,
+                "session_check",
+                session_mode=int(session_info.mode),
+                substream=self.substream,
             )
             resend = (
                 c_int(1)
@@ -881,6 +1101,12 @@ class WyzeIOTCSession:
                 resend,
             )
             logger.debug(f"[IOTC] av_client_start returned {av_chan_id=}")
+            _log_tutk_trace(
+                self.camera,
+                "av_client_start",
+                av_chan_id=int(av_chan_id),
+                substream=self.substream,
+            )
 
             if int(av_chan_id) < 0:
                 logger.error(
@@ -891,6 +1117,13 @@ class WyzeIOTCSession:
             self.state = WyzeIOTCSessionState.CONNECTED
             logger.info(f"[DEBUG] AV Client connected successfully: {av_chan_id}")
         except tutk.TutkError as e:
+            _log_tutk_trace(
+                self.camera,
+                "connect_error",
+                code=e.code,
+                error=str(e),
+                substream=self.substream,
+            )
             logger.error(f"[DEBUG] TutkError in _connect: code={e.code}, message={e}")
             self._disconnect()
             raise
@@ -936,6 +1169,7 @@ class WyzeIOTCSession:
 
         self.state = WyzeIOTCSessionState.AUTHENTICATING
         logger.info(f"[DEBUG] _auth() starting for {self.camera.nickname}")
+        _log_tutk_trace(self.camera, "auth_start", substream=self.substream)
         try:
             with self.iotctrl_mux() as mux:
                 wake_mac = None
@@ -957,6 +1191,12 @@ class WyzeIOTCSession:
                 logger.info(f"[IOTC] {challenge.resp_protocol=}")
                 logger.info(
                     f"[DEBUG] Challenge result received, protocol: {challenge.resp_protocol}"
+                )
+                _log_tutk_trace(
+                    self.camera,
+                    "auth_challenge",
+                    resp_protocol=challenge.resp_protocol,
+                    substream=self.substream,
                 )
 
                 challenge_response = respond_to_ioctrl_10001(
@@ -984,6 +1224,12 @@ class WyzeIOTCSession:
                 logger.info(
                     f"[DEBUG] Auth response received: connectionRes={auth_response.get('connectionRes')}"
                 )
+                _log_tutk_trace(
+                    self.camera,
+                    "auth_response",
+                    connection_res=auth_response.get("connectionRes"),
+                    substream=self.substream,
+                )
 
                 if auth_response["connectionRes"] == "2":
                     logger.error("[DEBUG] connectionRes=2 - ENR_AUTH_FAILED")
@@ -1001,12 +1247,32 @@ class WyzeIOTCSession:
 
                 mux.send_ioctl(self.set_resolving_bit()).result()
                 self.state = WyzeIOTCSessionState.AUTHENTICATION_SUCCEEDED
+                _log_tutk_trace(
+                    self.camera,
+                    "auth_success",
+                    bitrate=self.preferred_bitrate,
+                    frame_size=self.preferred_frame_size,
+                    substream=self.substream,
+                )
                 logger.info("[DEBUG] Authentication completed successfully")
         except tutk.TutkError as e:
+            _log_tutk_trace(
+                self.camera,
+                "auth_error",
+                code=e.code,
+                error=str(e),
+                substream=self.substream,
+            )
             logger.error(f"[DEBUG] TutkError in _auth: code={e.code}, message={e}")
             self._disconnect()
             raise
         except ValueError as e:
+            _log_tutk_trace(
+                self.camera,
+                "auth_error",
+                error=str(e),
+                substream=self.substream,
+            )
             logger.error(f"[DEBUG] ValueError in _auth: {e}")
             raise
         finally:

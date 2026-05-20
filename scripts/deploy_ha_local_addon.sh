@@ -109,11 +109,13 @@ sync_dev_tree() {
   REMOTE_ROOT="${HA_DEV_ADDON_ROOT:-/addons/local/wyze_bridge_dev}"
   APP_SLUG="${HA_DEV_ADDON_SLUG:-docker_wyze_bridge_dev}"
   REMOTE_CONFIG_SLUG="${HA_DEV_REMOTE_CONFIG_SLUG:-}"
+  BUILT_DEV_ROOT="$REPO_DIR/.build/ha_live_addon"
+  "$SCRIPT_DIR/build.sh" ha_live_addon "$BUILT_DEV_ROOT" >/dev/null
   "$SCRIPT_DIR/ha_ssh.sh" mkdir -p "$REMOTE_ROOT"
   COPYFILE_DISABLE=1 tar \
     --exclude='.DS_Store' \
     --exclude='._*' \
-    -C "$REPO_DIR/.ha_live_addon" -cf - . \
+    -C "$BUILT_DEV_ROOT" -cf - . \
     | "$SCRIPT_DIR/ha_ssh.sh" "mkdir -p '$REMOTE_ROOT' && tar -xf - -C '$REMOTE_ROOT'"
   if [ -n "$REMOTE_CONFIG_SLUG" ]; then
     "$SCRIPT_DIR/ha_ssh.sh" sh -s -- "$REMOTE_ROOT" "$REMOTE_CONFIG_SLUG" <<'EOF'
@@ -131,19 +133,21 @@ EOF
 sync_prod_patch() {
   REMOTE_ROOT="${HA_PROD_ADDON_ROOT:-/addons/local/wyze_bridge}"
   APP_SLUG="${HA_PROD_ADDON_SLUG:-docker_wyze_bridge_v4}"
+  copy_file "home_assistant/config.yml" "$REMOTE_ROOT"
   copy_file "app/templates/index.html" "$REMOTE_ROOT/app/templates"
   copy_file "app/templates/base.html" "$REMOTE_ROOT/app/templates"
   copy_file "app/static/site.js" "$REMOTE_ROOT/app/static"
   copy_file "app/static/site.css" "$REMOTE_ROOT/app/static"
-  copy_file "app/.env" "$REMOTE_ROOT/app"
+  copy_file "home_assistant/app/.env" "$REMOTE_ROOT/app"
   copy_file "app/wyzecam/api_models.py" "$REMOTE_ROOT/app/wyzecam"
   copy_file "app/wyze_bridge.py" "$REMOTE_ROOT/app"
   copy_file "app/wyzebridge/mtx_server.py" "$REMOTE_ROOT/app/wyzebridge"
   copy_file "app/wyzebridge/wyze_api.py" "$REMOTE_ROOT/app/wyzebridge"
+  copy_file "app/wyzebridge/go2rtc.py" "$REMOTE_ROOT/app/wyzebridge"
   copy_file "app/wyzebridge/web_ui.py" "$REMOTE_ROOT/app/wyzebridge"
   copy_file "app/wyzebridge/wyze_stream.py" "$REMOTE_ROOT/app/wyzebridge"
   copy_file "app/frontend.py" "$REMOTE_ROOT/app"
-  copy_file ".ha_live_addon/whep_proxy/main.go" "$REMOTE_ROOT/whep_proxy"
+  copy_file "whep_proxy/main.go" "$REMOTE_ROOT/whep_proxy"
 }
 
 case "$TARGET" in
@@ -151,6 +155,8 @@ case "$TARGET" in
     sync_dev_tree
     ;;
   prod)
+    APP_SLUG="${HA_PROD_ADDON_SLUG:-docker_wyze_bridge_v4}"
+    REMOTE_ROOT="${HA_PROD_ADDON_ROOT:-/addons/local/wyze_bridge}"
     PROD_REPOSITORY=$(addon_field "$APP_SLUG" repository 2>/dev/null || printf '')
     if [ "$PROD_REPOSITORY" != "local" ]; then
       cat >&2 <<EOF

@@ -1,5 +1,16 @@
 # Release Notes 4.3
 
+## 4.3.2 Release
+
+`4.3.2` is a Home Assistant stability and release-hygiene patch for the `4.3` release line.
+
+- Startup readiness now waits for the authenticated camera catalog and semantic `/api/ready` state before publishing ready, which prevents empty boot-time catalogs from clearing native `go2rtc` aliases.
+- Snapshot refresh now validates content rather than trusting status codes or mtimes: empty, tiny, non-image, stale, and byte-identical frames are rejected before they replace cached stills.
+- `SD_ONLY=true` is now a hard Home Assistant mode. Production proof covers one SD feed per camera, HD controls and HD enable paths rejected or hidden, and only `*-sd` native aliases exposed by `go2rtc`.
+- The WHEP proxy now keeps recently healthy streams in a bounded recovering state during short reconnect windows, while still expiring and recreating streams that fail to recover media.
+- The runtime overlay build is now the packaging source of truth, with release hygiene checks that keep local agent notes, scratch files, option payloads, SSH env files, and private SDK values out of public artifacts.
+- Current live proof is intentionally scoped: Phase 1 snapshots, Phase 2 startup/API, Phase 3 SD-only, and Phase 5 overlay/API pass. The strict one-hour Phase 4 gate remains red because Frigate/Scrypted skipped-FPS blips occurred even while WHEP media stayed ready.
+
 ## 4.3.1 Release
 
 `4.3.1` is the preview-integrity and snapshot-refresh follow-up for the `4.3` release line.

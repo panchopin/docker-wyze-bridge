@@ -12,9 +12,11 @@ from typing import Any, Optional
 from requests import PreparedRequest, Response
 import requests as _requests
 
+
 def get(url, **kwargs):
     kwargs.setdefault("verify", SSL_VERIFY)
     return _requests.get(url, **kwargs)
+
 
 def post(url, **kwargs):
     kwargs.setdefault("verify", SSL_VERIFY)
@@ -33,6 +35,7 @@ SSL_VERIFY: bool | str = getenv("SSL_VERIFY", "false").lower()
 if SSL_VERIFY in {"false", "0", "no", "disable", "off"}:
     SSL_VERIFY = False
     import urllib3
+
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 elif getenv("SSL_CERT_FILE"):
     SSL_VERIFY = getenv("SSL_CERT_FILE")
@@ -40,6 +43,7 @@ elif getenv("REQUESTS_CA_BUNDLE"):
     SSL_VERIFY = getenv("REQUESTS_CA_BUNDLE")
 else:
     SSL_VERIFY = True
+
 CLOUD_API = "https://app-core.cloud.wyze.com/app"
 NEW_WYZE_API = "https://app.wyzecam.com/app"
 DEVICE_MANAGEMENT_API = "https://devicemgmt-service.wyze.com"

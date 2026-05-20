@@ -8,3 +8,12 @@
 .opencode/
 scripts/.ha_ssh.env
 worktrees/
+tmp/
+.build/
+.pi-lens/
+data/
+AGENTS.md
+lessons.md
+.goal-master.md
+**/options_payload*.json
+**/*options-payload*.json

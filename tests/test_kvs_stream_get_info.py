@@ -39,7 +39,15 @@ sys.path.insert(
     0, str(pathlib.Path(__file__).resolve().parent.parent / ".ha_live_addon" / "app")
 )
 
+if not hasattr(sys.modules.get("wyzebridge.wyze_stream"), "StreamStatus"):
+    for module_name in list(sys.modules):
+        if module_name == "wyzebridge" or module_name.startswith("wyzebridge."):
+            del sys.modules[module_name]
+
 from wyzebridge.wyze_stream import StreamStatus, WyzeStream
+
+if not hasattr(sys.modules["wyzebridge.wyze_stream"], "publish_discovery"):
+    sys.modules["wyzebridge.wyze_stream"].publish_discovery = lambda *args, **kwargs: None
 
 
 class DummyApi:
@@ -77,7 +85,7 @@ class TestKVSStreamGetInfo(unittest.TestCase):
         user = SimpleNamespace()
         camera = make_camera()
 
-        with patch("wyzebridge.wyze_stream.publish_discovery"):
+        with patch("wyzebridge.wyze_stream.publish_discovery", create=True):
             stream = WyzeStream(
                 user,
                 DummyApi(),
@@ -112,7 +120,7 @@ class TestKVSStreamGetInfo(unittest.TestCase):
         response = SimpleNamespace(status_code=200, raise_for_status=lambda: None)
         mock_get.return_value = response
 
-        with patch("wyzebridge.wyze_stream.publish_discovery"):
+        with patch("wyzebridge.wyze_stream.publish_discovery", create=True):
             stream = WyzeStream(
                 user,
                 DummyApi(),
@@ -140,6 +148,40 @@ class TestKVSStreamGetInfo(unittest.TestCase):
         self.assertEqual(info["talkback_source"], "go2rtc")
 
     @patch("wyzebridge.go2rtc.requests.get")
+    def test_sd_only_bridge_feed_does_not_report_native_snapshot_source(self, mock_get):
+        user = SimpleNamespace()
+        camera = make_camera()
+        camera.product_model = "HL_CAM4"
+        camera.model_name = "Wyze Cam v4"
+        response = SimpleNamespace(status_code=200, raise_for_status=lambda: None)
+        mock_get.return_value = response
+
+        with (
+            patch("wyzebridge.wyze_stream.publish_discovery", create=True),
+            patch.dict("os.environ", {"SD_ONLY": "true"}, clear=False),
+        ):
+            stream = WyzeStream(
+                user,
+                DummyApi(),
+                camera,
+                SimpleNamespace(
+                    quality="sd30",
+                    audio=True,
+                    record=False,
+                    reconnect=True,
+                    substream=False,
+                    frame_size=1,
+                    bitrate=30,
+                    update_quality=lambda hq: None,
+                ),
+            )
+            info = stream.get_info()
+
+        self.assertFalse(info["native_selected"])
+        self.assertEqual(info["snapshot_source"], "rtsp")
+        self.assertFalse(info["talkback_supported"])
+
+    @patch("wyzebridge.go2rtc.requests.get")
     def test_hl_bc_reports_talkback_as_unavailable_when_bridge_first(self, mock_get):
         user = SimpleNamespace()
         camera = make_camera()
@@ -148,7 +190,7 @@ class TestKVSStreamGetInfo(unittest.TestCase):
         response = SimpleNamespace(status_code=200, raise_for_status=lambda: None)
         mock_get.return_value = response
 
-        with patch("wyzebridge.wyze_stream.publish_discovery"):
+        with patch("wyzebridge.wyze_stream.publish_discovery", create=True):
             stream = WyzeStream(
                 user,
                 DummyApi(),
@@ -182,7 +224,7 @@ class TestKVSStreamGetInfo(unittest.TestCase):
         response = SimpleNamespace(status_code=200, raise_for_status=lambda: None)
         mock_get.return_value = response
 
-        with patch("wyzebridge.wyze_stream.publish_discovery"):
+        with patch("wyzebridge.wyze_stream.publish_discovery", create=True):
             main_stream = WyzeStream(
                 user,
                 DummyApi(),
@@ -236,7 +278,7 @@ class TestKVSStreamGetInfo(unittest.TestCase):
         response = SimpleNamespace(status_code=200, raise_for_status=lambda: None)
         mock_get.return_value = response
 
-        with patch("wyzebridge.wyze_stream.publish_discovery"):
+        with patch("wyzebridge.wyze_stream.publish_discovery", create=True):
             stream = WyzeStream(
                 user,
                 DummyApi(),

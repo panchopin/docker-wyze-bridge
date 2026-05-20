@@ -48,6 +48,9 @@ type WebRTCStream struct {
 	videoPPSPacket    *rtp.Packet
 	videoSPSBytes     int
 	videoPPSBytes     int
+	videoParamFUA     []byte
+	videoParamFUASeq  uint16
+	videoParamFUAOpen bool
 	videoOutSeq       uint16
 	audioOutSeq       uint16
 	videoOutSeqSet    bool
@@ -55,19 +58,23 @@ type WebRTCStream struct {
 	videoReady        atomic.Bool
 	videoPrimed       atomic.Bool
 	audioReady        atomic.Bool
+	audioPacketsSeen  atomic.Uint64
 	upstreamAlive     atomic.Bool
 	reconnecting      atomic.Bool
+	reconnectAttempts atomic.Int32
 	destroyed         atomic.Bool
 	videoReplayLogged atomic.Bool
 	videoIDRLogged    atomic.Bool
 	videoParamsMissed atomic.Bool
+	videoReplayMisses atomic.Int32
 	// streamCreatedAt is set once when the stream is first registered and never
 	// reset.  Together with hasEverHadMedia it lets canReuse() detect streams
 	// that have been wedged since birth (upstream never reaches "connected") and
 	// force a destroy/recreate cycle instead of recycling them indefinitely.
-	streamCreatedAt time.Time
-	hasEverHadMedia atomic.Bool
-	staleLogged     atomic.Bool
+	streamCreatedAt   time.Time
+	recoveryStartedAt time.Time
+	hasEverHadMedia   atomic.Bool
+	staleLogged       atomic.Bool
 }
 
 type UpstreamSession struct {
@@ -122,19 +129,23 @@ const startupReuseWindow = 20 * time.Second
 // forcing a destroy/recreate cycle on the next config POST from the Python
 // bridge.  Two minutes is generous: a healthy KVS camera connects in < 30s.
 const maxNoMediaAge = 2 * time.Minute
+const maxRecoveryAge = 90 * time.Second
+const maxNoVideoReconnectAttempts int32 = 3
+const maxVideoParamReplayFailures int32 = 3
+const streamHealthCheckInterval = 30 * time.Second
 
 func (stream *WebRTCStream) outputTracks() []*webrtc.TrackLocalStaticRTP {
 	stream.mediaMu.RLock()
 	defer stream.mediaMu.RUnlock()
 
 	tracks := make([]*webrtc.TrackLocalStaticRTP, 0, 2)
+	if !stream.videoReady.Load() {
+		return tracks
+	}
 	if stream.videoTrack != nil {
-		if !stream.videoReady.Load() {
-			return tracks
-		}
 		tracks = append(tracks, stream.videoTrack)
 	}
-	if stream.audioTrack != nil && stream.audioReady.Load() {
+	if stream.audioTrack != nil && stream.audioReady.Load() && stream.audioPacketsSeen.Load() > 0 {
 		tracks = append(tracks, stream.audioTrack)
 	}
 	return tracks
@@ -153,6 +164,18 @@ func (stream *WebRTCStream) ensureETag() string {
 func (stream *WebRTCStream) canReuse() bool {
 	if stream == nil || stream.destroyed.Load() {
 		return false
+	}
+	if stream.hasEverHadMedia.Load() {
+		stream.mediaMu.RLock()
+		recoveryStartedAt := stream.recoveryStartedAt
+		stream.mediaMu.RUnlock()
+		if !recoveryStartedAt.IsZero() && time.Since(recoveryStartedAt) > maxRecoveryAge {
+			if stream.staleLogged.CompareAndSwap(false, true) {
+				log.Printf("[WHEP_PROXY] Stream %s declared stale: recovery exceeded %s",
+					stream.streamID, maxRecoveryAge)
+			}
+			return false
+		}
 	}
 	// Hard timeout: if no media has ever flowed and the stream has been alive
 	// longer than maxNoMediaAge, declare it stale.  This breaks the perpetual
@@ -190,6 +213,28 @@ func (stream *WebRTCStream) canReuse() bool {
 	return time.Since(session.startedAt) < startupReuseWindow
 }
 
+func (stream *WebRTCStream) markReconnectAttempt(attempt int) {
+	if !stream.videoReady.Load() && !stream.hasEverHadMedia.Load() {
+		stream.reconnectAttempts.Add(1)
+		return
+	}
+	stream.reconnectAttempts.Store(int32(attempt))
+}
+
+func (stream *WebRTCStream) clearReconnectMetrics() {
+	stream.reconnectAttempts.Store(0)
+}
+
+func (stream *WebRTCStream) shouldForceRecreateNoVideo() bool {
+	if stream == nil || stream.destroyed.Load() {
+		return false
+	}
+	return stream.reconnecting.Load() &&
+		!stream.videoReady.Load() &&
+		!stream.hasEverHadMedia.Load() &&
+		stream.reconnectAttempts.Load() > maxNoVideoReconnectAttempts
+}
+
 func (stream *WebRTCStream) setVideoSource(track *webrtc.TrackRemote) {
 	stream.mediaMu.Lock()
 	defer stream.mediaMu.Unlock()
@@ -199,6 +244,8 @@ func (stream *WebRTCStream) setVideoSource(track *webrtc.TrackRemote) {
 		// Once we have a video track the stream has produced real media; disable
 		// the maxNoMediaAge guard for the rest of this stream's lifetime.
 		stream.hasEverHadMedia.Store(true)
+		stream.recoveryStartedAt = time.Time{}
+		stream.clearReconnectMetrics()
 	}
 }
 
@@ -206,10 +253,20 @@ func (stream *WebRTCStream) setAudioReady(ready bool) {
 	stream.audioReady.Store(ready)
 }
 
+func (stream *WebRTCStream) markAudioPacketSeen() {
+	stream.audioPacketsSeen.Add(1)
+}
+
 func (stream *WebRTCStream) status() map[string]interface{} {
 	upstreamState := ""
 	if session := stream.currentUpstream(); session != nil && session.peerConnection != nil {
 		upstreamState = session.peerConnection.ConnectionState().String()
+	}
+	stream.mediaMu.RLock()
+	recoveryStartedAt := stream.recoveryStartedAt
+	stream.mediaMu.RUnlock()
+	if !recoveryStartedAt.IsZero() && upstreamState == webrtc.PeerConnectionStateNew.String() {
+		upstreamState = "recovering"
 	}
 
 	streamAgeSec := 0.0
@@ -218,14 +275,15 @@ func (stream *WebRTCStream) status() map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"upstream_state":    upstreamState,
-		"upstream_alive":    stream.upstreamAlive.Load(),
-		"can_reuse":         stream.canReuse(),
-		"video_ready":       stream.videoReady.Load(),
-		"audio_ready":       stream.audioReady.Load(),
-		"whep_clients":      stream.whepClients.Load(),
+		"upstream_state":     upstreamState,
+		"upstream_alive":     stream.upstreamAlive.Load(),
+		"can_reuse":          stream.canReuse(),
+		"video_ready":        stream.videoReady.Load(),
+		"audio_ready":        stream.audioReady.Load(),
+		"audio_packets_seen": stream.audioPacketsSeen.Load(),
+		"whep_clients":       stream.whepClients.Load(),
 		"has_ever_had_media": stream.hasEverHadMedia.Load(),
-		"stream_age_sec":    streamAgeSec,
+		"stream_age_sec":     streamAgeSec,
 	}
 }
 
@@ -320,7 +378,7 @@ func shouldReconnectOnNormalWSClosure(state webrtc.PeerConnectionState, videoRea
 		return true
 	}
 
-	return !(videoReady || audioReady)
+	return !videoReady
 }
 
 func closeNormalRotationWebsocket(session *UpstreamSession) {
@@ -382,6 +440,30 @@ func (stream *WebRTCStream) clearUpstreamIfCurrent(session *UpstreamSession) boo
 }
 
 func (stream *WebRTCStream) resetUpstreamMediaState() {
+	if stream.hasEverHadMedia.Load() {
+		stream.mediaMu.Lock()
+		stream.videoSource = nil
+		if stream.recoveryStartedAt.IsZero() {
+			stream.recoveryStartedAt = time.Now()
+		}
+		stream.videoParamPacket = nil
+		stream.videoSPSPacket = nil
+		stream.videoPPSPacket = nil
+		stream.videoSPSBytes = 0
+		stream.videoPPSBytes = 0
+		stream.videoParamFUA = nil
+		stream.videoParamFUASeq = 0
+		stream.videoParamFUAOpen = false
+		stream.mediaMu.Unlock()
+		stream.videoPLIRequested.Store(false)
+		stream.videoPrimed.Store(false)
+		stream.videoReplayLogged.Store(false)
+		stream.videoIDRLogged.Store(false)
+		stream.videoParamsMissed.Store(false)
+		stream.videoReplayMisses.Store(0)
+		return
+	}
+
 	stream.setVideoSource(nil)
 	stream.setAudioReady(false)
 	stream.videoPLIRequested.Store(false)
@@ -395,7 +477,12 @@ func (stream *WebRTCStream) resetUpstreamMediaState() {
 	stream.videoPPSPacket = nil
 	stream.videoSPSBytes = 0
 	stream.videoPPSBytes = 0
+	stream.videoParamFUA = nil
+	stream.videoParamFUASeq = 0
+	stream.videoParamFUAOpen = false
 	stream.mediaMu.Unlock()
+	stream.audioPacketsSeen.Store(0)
+	stream.videoReplayMisses.Store(0)
 }
 
 func closeUpstreamSession(session *UpstreamSession) {
@@ -514,8 +601,63 @@ func parseSTAPAParameterSets(payload []byte) (int, int) {
 	return spsBytes, ppsBytes
 }
 
+func (stream *WebRTCStream) bufferFragmentedSTAPA(pkt *rtp.Packet) bool {
+	if pkt == nil || len(pkt.Payload) < 2 || pkt.Payload[0]&0x1F != 28 {
+		return false
+	}
+
+	start := pkt.Payload[1]&0x80 != 0
+	end := pkt.Payload[1]&0x40 != 0
+	origType := pkt.Payload[1] & 0x1F
+	if origType != 24 {
+		return false
+	}
+
+	stream.mediaMu.Lock()
+	defer stream.mediaMu.Unlock()
+
+	if start {
+		reconstructedHeader := (pkt.Payload[0] & 0xE0) | origType
+		stream.videoParamFUA = append([]byte{reconstructedHeader}, pkt.Payload[2:]...)
+		stream.videoParamFUASeq = pkt.SequenceNumber
+		stream.videoParamFUAOpen = true
+	} else {
+		if !stream.videoParamFUAOpen || pkt.SequenceNumber != stream.videoParamFUASeq+1 {
+			stream.videoParamFUA = nil
+			stream.videoParamFUAOpen = false
+			return true
+		}
+		stream.videoParamFUA = append(stream.videoParamFUA, pkt.Payload[2:]...)
+		stream.videoParamFUASeq = pkt.SequenceNumber
+	}
+
+	if !end {
+		return true
+	}
+
+	payload := append([]byte(nil), stream.videoParamFUA...)
+	stream.videoParamFUA = nil
+	stream.videoParamFUAOpen = false
+	spsBytes, ppsBytes := parseSTAPAParameterSets(payload)
+	if spsBytes == 0 && ppsBytes == 0 {
+		return true
+	}
+
+	paramPacket := cloneRTPPacket(pkt)
+	paramPacket.Payload = payload
+	stream.videoParamPacket = paramPacket
+	stream.videoSPSPacket = nil
+	stream.videoPPSPacket = nil
+	stream.videoSPSBytes = spsBytes
+	stream.videoPPSBytes = ppsBytes
+	return true
+}
+
 func (stream *WebRTCStream) bufferVideoParameterSet(pkt *rtp.Packet) {
 	if pkt == nil || len(pkt.Payload) == 0 {
+		return
+	}
+	if stream.bufferFragmentedSTAPA(pkt) {
 		return
 	}
 
@@ -607,6 +749,7 @@ func (stream *WebRTCStream) replayVideoParameterSets(
 		log.Printf("[WHEP_PROXY] Replayed SPS (%d bytes) + PPS (%d bytes) before IDR for %s", spsBytes, ppsBytes, streamID)
 	}
 	stream.videoParamsMissed.Store(false)
+	stream.videoReplayMisses.Store(0)
 	return true
 }
 
@@ -623,6 +766,10 @@ func (stream *WebRTCStream) shouldForwardVideoPacket(pkt *rtp.Packet) bool {
 		return true
 	}
 	return false
+}
+
+func (stream *WebRTCStream) recordVideoReplayFailure() bool {
+	return stream.videoReplayMisses.Add(1) >= maxVideoParamReplayFailures
 }
 
 func (stream *WebRTCStream) writeLocalTrack(localTrack *webrtc.TrackLocalStaticRTP, pkt *rtp.Packet) error {
@@ -702,6 +849,9 @@ func forwardTrack(
 		}
 
 		readCount++
+		if track.Kind() == webrtc.RTPCodecTypeAudio {
+			stream.markAudioPacketSeen()
+		}
 		videoFUAEnded := false
 		if track.Kind() == webrtc.RTPCodecTypeVideo {
 			stream.bufferVideoParameterSet(pkt)
@@ -728,6 +878,11 @@ func forwardTrack(
 			videoFUAEnded = isFUA && fuaEnd
 			if isIDR {
 				if !stream.replayVideoParameterSets(localTrack, streamID, pkt.Timestamp) {
+					if stream.recordVideoReplayFailure() {
+						log.Printf("[WHEP_PROXY] Reconnecting upstream for %s: missing SPS/PPS across %d consecutive IDR frames", streamID, maxVideoParamReplayFailures)
+						stream.handleUpstreamDisconnect(session, "missing SPS/PPS across consecutive IDR frames")
+						return
+					}
 					droppedCount++
 					continue
 				}
@@ -837,6 +992,131 @@ func destroyStreamIfCurrent(streamID string, stream *WebRTCStream) {
 	}
 }
 
+func newWebRTCStream(streamID string, config WebRTCConfig) (*WebRTCStream, error) {
+	videoTrack, err := webrtc.NewTrackLocalStaticRTP(
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264},
+		"video",
+		"pion",
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	audioTrack, err := webrtc.NewTrackLocalStaticRTP(
+		webrtc.RTPCodecCapability{
+			MimeType:  webrtc.MimeTypePCMU,
+			ClockRate: 8000,
+			Channels:  2,
+		},
+		"audio",
+		"pion",
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	stream := &WebRTCStream{
+		streamID:        streamID,
+		videoTrack:      videoTrack,
+		audioTrack:      audioTrack,
+		streamCreatedAt: time.Now(),
+	}
+	stream.setConfig(config)
+	return stream, nil
+}
+
+func startStreamUpstream(stream *WebRTCStream) {
+	go func(stream *WebRTCStream) {
+		if err := establishUpstream(stream); err != nil {
+			log.Printf("[WHEP_PROXY] Initial upstream establish failed for %s: %v", stream.streamID, err)
+			stream.scheduleReconnect("initial establish failed")
+		}
+	}(stream)
+}
+
+func recreateStreamFromBridge(streamID string, current *WebRTCStream, reason string) error {
+	config, err := fetchKVSConfig(streamID)
+	if err != nil {
+		if isTerminalRefreshError(err) {
+			log.Printf("[WHEP_PROXY] Destroying unrecoverable stream %s during health recreate: %v", streamID, err)
+			destroyStreamIfCurrent(streamID, current)
+		}
+		return err
+	}
+
+	replacement, err := newWebRTCStream(streamID, config)
+	if err != nil {
+		return err
+	}
+
+	streamsMu.Lock()
+	if existing := streams[streamID]; existing != current {
+		streamsMu.Unlock()
+		return nil
+	}
+	destroyStreamLocked(streamID, current)
+	streams[streamID] = replacement
+	streamsMu.Unlock()
+
+	log.Printf("[WHEP_PROXY] Recreated upstream stream for %s after health check: %s", streamID, reason)
+	startStreamUpstream(replacement)
+	return nil
+}
+
+var recreateStreamFn func(string, *WebRTCStream, string) error
+
+func init() {
+	recreateStreamFn = recreateStreamFromBridge
+}
+
+func reapStaleStreams() int {
+	type candidate struct {
+		id     string
+		stream *WebRTCStream
+		reason string
+	}
+
+	candidates := make([]candidate, 0)
+	streamsMu.Lock()
+	for streamID, stream := range streams {
+		switch {
+		case stream.shouldForceRecreateNoVideo():
+			candidates = append(candidates, candidate{
+				id:     streamID,
+				stream: stream,
+				reason: fmt.Sprintf("no video after %d reconnect attempts", stream.reconnectAttempts.Load()),
+			})
+		case !stream.canReuse():
+			candidates = append(candidates, candidate{
+				id:     streamID,
+				stream: stream,
+				reason: "stale stream is no longer reusable",
+			})
+		}
+	}
+	streamsMu.Unlock()
+
+	for _, c := range candidates {
+		if err := recreateStreamFn(c.id, c.stream, c.reason); err != nil {
+			log.Printf("[WHEP_PROXY] Failed to recreate stale stream %s: %v", c.id, err)
+		}
+	}
+	return len(candidates)
+}
+
+func runStreamHealthReaper(stop <-chan struct{}) {
+	ticker := time.NewTicker(streamHealthCheckInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			reapStaleStreams()
+		case <-stop:
+			return
+		}
+	}
+}
+
 func (stream *WebRTCStream) scheduleReconnect(reason string) {
 	if stream.destroyed.Load() {
 		return
@@ -850,6 +1130,15 @@ func (stream *WebRTCStream) scheduleReconnect(reason string) {
 		for attempt := 1; ; attempt++ {
 			if stream.destroyed.Load() {
 				stream.reconnecting.Store(false)
+				return
+			}
+			stream.markReconnectAttempt(attempt)
+			if stream.shouldForceRecreateNoVideo() {
+				stream.reconnecting.Store(false)
+				reason := fmt.Sprintf("no video after %d reconnect attempts", attempt)
+				if err := recreateStreamFn(stream.streamID, stream, reason); err != nil {
+					log.Printf("[WHEP_PROXY] Failed to recreate %s after reconnect wedge: %v", stream.streamID, err)
+				}
 				return
 			}
 
@@ -905,6 +1194,9 @@ func kvsConfigURL(streamID string) string {
 	}
 	port := os.Getenv("KVS_CONFIG_PORT")
 	if port == "" {
+		port = os.Getenv("WB_APP_PORT")
+	}
+	if port == "" {
 		port = "5000"
 	}
 	return fmt.Sprintf("http://%s:%s/kvs-config/%s", host, port, streamID)
@@ -950,6 +1242,17 @@ func isLoopbackRemoteAddr(remoteAddr string) bool {
 	return parsed != nil && parsed.IsLoopback()
 }
 
+func whepListenAddress() string {
+	port := strings.TrimSpace(os.Getenv("WHEP_PROXY_PORT"))
+	if port == "" {
+		port = "8080"
+	}
+	if strings.HasPrefix(port, ":") {
+		return "127.0.0.1" + port
+	}
+	return "127.0.0.1:" + port
+}
+
 func main() {
 	r := mux.NewRouter()
 	r.HandleFunc("/whep/{streamID}", whepHandler).Methods("GET", "OPTIONS", "POST")
@@ -957,15 +1260,19 @@ func main() {
 	r.HandleFunc("/status/{streamID}", statusHandler).Methods("GET")
 
 	go func() {
-		fmt.Println("[WHEP_PROXY] Listening on 127.0.0.1:8080")
-		if err := http.ListenAndServe("127.0.0.1:8080", r); err != nil {
+		addr := whepListenAddress()
+		fmt.Printf("[WHEP_PROXY] Listening on %s\n", addr)
+		if err := http.ListenAndServe(addr, r); err != nil {
 			panic(err)
 		}
 	}()
+	stopReaper := make(chan struct{})
+	go runStreamHealthReaper(stopReaper)
 
 	sigchan := make(chan os.Signal, 1)
 	signal.Notify(sigchan, os.Interrupt)
 	<-sigchan
+	close(stopReaper)
 
 	fmt.Println("[WHEP_PROXY] Exiting.")
 
@@ -1239,11 +1546,11 @@ func establishUpstream(stream *WebRTCStream) error {
 	}
 
 	session := &UpstreamSession{
-		peerConnection: peerConnection,
-		wsConn:         conn,
-		correlationID:  generateCorrelationID(config.PhoneID),
+		peerConnection:    peerConnection,
+		wsConn:            conn,
+		correlationID:     generateCorrelationID(config.PhoneID),
 		recipientClientID: config.PhoneID,
-		startedAt:      time.Now(),
+		startedAt:         time.Now(),
 	}
 	stream.setUpstream(session)
 	traceLogf(stream.streamID, "upstream connect start signaling=%s", sanitizeLogURL(config.SignalingURL))
@@ -1539,39 +1846,13 @@ func websocketHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	videoTrack, err := webrtc.NewTrackLocalStaticRTP(
-		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264},
-		"video",
-		"pion",
-	)
+	stream, err := newWebRTCStream(streamID, config)
 	if err != nil {
 		streamsMu.Unlock()
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	audioTrack, err := webrtc.NewTrackLocalStaticRTP(
-		webrtc.RTPCodecCapability{
-			MimeType:  webrtc.MimeTypePCMU,
-			ClockRate: 8000,
-			Channels:  2,
-		},
-		"audio",
-		"pion",
-	)
-	if err != nil {
-		streamsMu.Unlock()
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	stream = &WebRTCStream{
-		streamID:        streamID,
-		videoTrack:      videoTrack,
-		audioTrack:      audioTrack,
-		streamCreatedAt: time.Now(),
-	}
-	stream.setConfig(config)
 	streams[streamID] = stream
 	streamsMu.Unlock()
 
@@ -1582,12 +1863,7 @@ func websocketHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
 
-	go func(stream *WebRTCStream) {
-		if err := establishUpstream(stream); err != nil {
-			log.Printf("[WHEP_PROXY] Initial upstream establish failed for %s: %v", stream.streamID, err)
-			stream.scheduleReconnect("initial establish failed")
-		}
-	}(stream)
+	startStreamUpstream(stream)
 }
 
 func statusHandler(w http.ResponseWriter, r *http.Request) {

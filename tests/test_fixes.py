@@ -126,12 +126,8 @@ def test_fixed_version():
 
     print(f"[{os.getpid()}] Child exit code: {p.exitcode}")
 
-    if p.exitcode == 0 or p.exitcode == -signal.SIGTERM:
-        print("✅ PASS: Fixed version handles signals correctly")
-        return True
-    else:
-        print("❌ FAIL: Fixed version had issues")
-        return False
+    assert p.exitcode == 0 or p.exitcode == -signal.SIGTERM
+    print("✅ PASS: Fixed version handles signals correctly")
 
 
 def test_assertion_error_handling():
@@ -160,10 +156,8 @@ def test_assertion_error_handling():
     except AssertionError:
         is_running = False
         print("✅ PASS: AssertionError caught and handled gracefully")
-        return True
 
-    print("❌ FAIL: AssertionError not caught")
-    return False
+    assert is_running is False
 
 
 def clean_up_test_func(main_pid):
@@ -192,38 +186,8 @@ def test_pid_check():
     p.join()
     result_child = p.exitcode == 0
 
-    if result_main and result_child:
-        print("✅ PASS: PID check working correctly")
-        return True
-    else:
-        print("❌ FAIL: PID check not working")
-        return False
-        print(f"[{os.getpid()}] Running cleanup in main process - CORRECT!")
-        return True
-
-    # Test from main process
-    result_main = clean_up()
-
-    # Test from child process
-    def child_test():
-        result = clean_up()
-        if not result:
-            print("✅ PASS: Child process correctly skipped cleanup")
-            return True
-        else:
-            print("❌ FAIL: Child process ran cleanup")
-            return False
-
-    p = mp.Process(target=child_test)
-    p.start()
-    p.join()
-
-    if result_main and p.exitcode == 0:
-        print("✅ PASS: PID check working correctly")
-        return True
-    else:
-        print("❌ FAIL: PID check not working")
-        return False
+    assert result_main and result_child
+    print("✅ PASS: PID check working correctly")
 
 
 def main():

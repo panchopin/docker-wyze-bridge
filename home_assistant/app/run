@@ -8,21 +8,49 @@ if [ -f /app/.env ]; then
 fi
 
 if [ "$BUILD" = "dev" ]; then
-    printenv
-    cat /data/options.json
+    echo "[RUN] Development build enabled; raw add-on options are not printed."
 fi
 
 start_whep_proxy() {
     if command -v whep_proxy >/dev/null 2>&1; then
-        for pid in $(ps | awk '/[s]h -c/ && /whep_proxy/ {print $1}'); do
-            kill "$pid" 2>/dev/null || true
-        done
+        whep_port="${WHEP_PROXY_PORT:-8080}"
+        whep_port_is_open() {
+            python3 - "$1" <<'PY'
+import socket
+import sys
+
+port = int(sys.argv[1])
+sock = socket.socket()
+sock.settimeout(1)
+try:
+    sock.connect(("127.0.0.1", port))
+except OSError:
+    raise SystemExit(1)
+finally:
+    sock.close()
+PY
+        }
+
+        if whep_port_is_open "$whep_port"; then
+            echo "[WHEP_PROXY] Existing listener detected on 127.0.0.1:${whep_port}; not starting a duplicate." >&2
+            return
+        fi
+        if command -v ps >/dev/null 2>&1; then
+            for pid in $(ps | awk '/[s]h -c/ && /whep_proxy/ {print $1}'); do
+                kill "$pid" 2>/dev/null || true
+            done
+        fi
         if command -v pkill >/dev/null 2>&1; then
             pkill -f '[w]hep_proxy >>/tmp/whep_proxy.log' 2>/dev/null || true
             pkill -x whep_proxy 2>/dev/null || true
         elif command -v pidof >/dev/null 2>&1; then
             # shellcheck disable=SC2046
             kill $(pidof whep_proxy) 2>/dev/null || true
+        fi
+        sleep 1
+        if whep_port_is_open "$whep_port"; then
+            echo "[WHEP_PROXY] Reusing listener on 127.0.0.1:${whep_port} after cleanup." >&2
+            return
         fi
         nohup sh -c '
             while :; do
@@ -42,4 +70,4 @@ start_go2rtc_sidecar
 
 export PYTHONPATH="/app${PYTHONPATH:+:$PYTHONPATH}"
 
-exec flask run --host=0.0.0.0 --port=5000
+exec flask run --host=0.0.0.0 --port="${WB_APP_PORT:-5000}"

@@ -147,6 +147,13 @@ def _normalized_hls(url: Optional[str]) -> Optional[str]:
     )
 
 
+def _mtx_port(env_name: str, default: str) -> str:
+    address = str(env_bool(env_name, default, style="original") or default).strip()
+    if ":" in address:
+        return address.rsplit(":", 1)[-1]
+    return address or default.strip(":")
+
+
 def _replace_url_host(url: Optional[str], hostname: str) -> Optional[str]:
     if not url:
         return url
@@ -232,8 +239,12 @@ def build_stream_entries(camera: dict, data: dict) -> list[dict]:
         else None
     )
 
-    lan_webrtc = f"http://{lan_base}:58889/{camera['uri']}/whep"
-    lan_hls = f"https://{lan_base}:58888/{camera['uri']}/stream.m3u8"
+    lan_webrtc = (
+        f"http://{lan_base}:{_mtx_port('MTX_WEBRTCADDRESS', ':8889')}/{camera['uri']}/whep"
+    )
+    lan_hls = (
+        f"https://{lan_base}:{_mtx_port('MTX_HLSADDRESS', ':8888')}/{camera['uri']}/stream.m3u8"
+    )
     lan_rtmp = f"rtmp://{lan_base}:51935/{camera['uri']}"
     lan_rtsp = f"rtsp://{lan_base}:58554/{camera['uri']}"
     if camera.get("native_selected") and camera.get("native_rtsp_url"):

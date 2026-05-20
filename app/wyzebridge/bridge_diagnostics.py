@@ -8,7 +8,7 @@ from wyzebridge.bridge_utils import env_bool
 from wyzebridge.go2rtc import go2rtc_probe
 
 DEFAULT_MEDIAMTX_API_PORT = 9997
-DEFAULT_WHEP_PROXY_PORT = 8080
+DEFAULT_WHEP_PROXY_PORT = int(os.getenv("WHEP_PROXY_PORT", "8080"))
 
 
 def _http_base(address: str | None, default_port: int) -> str:

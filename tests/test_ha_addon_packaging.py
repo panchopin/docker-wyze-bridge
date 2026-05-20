@@ -1,4 +1,5 @@
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -8,6 +9,136 @@ ADDON_DIR = ROOT / "home_assistant"
 
 
 class TestHomeAssistantAddonPackaging(unittest.TestCase):
+    def test_runtime_overlay_build_matches_checked_in_artifacts(self):
+        result = subprocess.run(
+            [str(ROOT / "scripts" / "build.sh"), "--check"],
+            cwd=ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("home_assistant: matches canonical app + overlay", result.stdout)
+        self.assertIn("ha_live_addon: matches canonical app + overlay", result.stdout)
+
+    def test_runtime_overlays_only_override_runtime_specific_app_files(self):
+        allowed_app_overlays = {
+            Path(".env"),
+            Path("build.env"),
+        }
+
+        for overlay_name in ("home_assistant", "ha_live_addon"):
+            app_overlay = ROOT / "runtime_overlays" / overlay_name / "app"
+            overlay_files = {
+                path.relative_to(app_overlay)
+                for path in app_overlay.rglob("*")
+                if path.is_file()
+            }
+            with self.subTest(overlay=overlay_name):
+                self.assertEqual(
+                    overlay_files,
+                    allowed_app_overlays,
+                    "runtime overlays should not carry independent Python, template, or static source copies",
+                )
+
+    def test_runtime_overlays_do_not_override_canonical_whep_proxy(self):
+        for overlay_name in ("home_assistant", "ha_live_addon"):
+            whep_overlay = ROOT / "runtime_overlays" / overlay_name / "whep_proxy"
+            overlay_files = (
+                {
+                    path.relative_to(whep_overlay)
+                    for path in whep_overlay.rglob("*")
+                    if path.is_file()
+                }
+                if whep_overlay.exists()
+                else set()
+            )
+            with self.subTest(overlay=overlay_name):
+                self.assertEqual(
+                    overlay_files,
+                    set(),
+                    "WHEP proxy should be canonical at repo-root whep_proxy/ so the master go test command exercises the same code that HA packages",
+                )
+
+    def test_release_hygiene_excludes_local_agent_and_secret_artifacts(self):
+        required_patterns = {
+            "tmp/",
+            ".build/",
+            ".pi-lens/",
+            "data/",
+            "AGENTS.md",
+            "lessons.md",
+            ".goal-master.md",
+            "**/options_payload*.json",
+            "**/*options-payload*.json",
+            "scripts/.ha_ssh.env",
+        }
+        ignore_files = [
+            ROOT / ".gitignore",
+            ROOT / ".dockerignore",
+            ROOT / "runtime_overlays" / "home_assistant" / ".dockerignore",
+            ROOT / "runtime_overlays" / "ha_live_addon" / ".dockerignore",
+        ]
+
+        for ignore_file in ignore_files:
+            patterns = set(ignore_file.read_text().splitlines())
+            with self.subTest(ignore_file=str(ignore_file.relative_to(ROOT))):
+                self.assertTrue(
+                    required_patterns.issubset(patterns),
+                    "release packaging should keep local notes, scratch files, option payloads, and SSH env files out of public artifacts",
+                )
+
+    def test_packaged_env_files_do_not_ship_private_sdk_key(self):
+        allowed_sdk_values = {
+            "",
+            "SDK_KEY_REPLACED_ROTATE_YOUR_KEY",
+        }
+        env_files = [
+            ROOT / "app" / ".env",
+            ROOT / "app" / "build.env",
+            ROOT / "home_assistant" / "app" / ".env",
+            ROOT / "home_assistant" / "app" / "build.env",
+            ROOT / ".ha_live_addon" / "app" / ".env",
+            ROOT / ".ha_live_addon" / "app" / "build.env",
+            ROOT / "runtime_overlays" / "home_assistant" / "app" / ".env",
+            ROOT / "runtime_overlays" / "home_assistant" / "app" / "build.env",
+            ROOT / "runtime_overlays" / "ha_live_addon" / "app" / ".env",
+            ROOT / "runtime_overlays" / "ha_live_addon" / "app" / "build.env",
+        ]
+
+        for env_file in env_files:
+            env_text = env_file.read_text()
+            sdk_match = re.search(r"^SDK_KEY=(.*)$", env_text, re.MULTILINE)
+            with self.subTest(env_file=str(env_file.relative_to(ROOT))):
+                if sdk_match is None:
+                    continue
+                self.assertIn(
+                    sdk_match.group(1).strip(),
+                    allowed_sdk_values,
+                    f"{env_file.relative_to(ROOT)} should use the public SDK_KEY placeholder for release packaging",
+                )
+
+    def test_master_whep_proxy_go_test_command_runs_from_repo_root(self):
+        result = subprocess.run(
+            ["go", "test", "./whep_proxy/...", "-v", "-count=1"],
+            cwd=ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("PASS", result.stdout)
+
+    def test_prod_patch_deploy_uses_canonical_whep_proxy(self):
+        deploy_script = (ROOT / "scripts" / "deploy_ha_local_addon.sh").read_text()
+
+        self.assertIn('copy_file "whep_proxy/main.go"', deploy_script)
+        self.assertNotIn('copy_file ".ha_live_addon/whep_proxy/main.go"', deploy_script)
+
     def test_all_runtime_entrypoints_source_go2rtc_helper(self):
         run_files = [
             ROOT / "app" / "run",
@@ -47,6 +178,22 @@ class TestHomeAssistantAddonPackaging(unittest.TestCase):
                     run_text,
                     "runtime entrypoints should export /app on PYTHONPATH so flask can import wyzebridge from the add-on workdir",
                 )
+
+    def test_all_runtime_entrypoints_reuse_existing_whep_listener(self):
+        run_files = [
+            ROOT / "app" / "run",
+            ROOT / "home_assistant" / "app" / "run",
+            ROOT / ".ha_live_addon" / "app" / "run",
+        ]
+
+        for run_path in run_files:
+            run_text = run_path.read_text()
+            with self.subTest(run=str(run_path.relative_to(ROOT))):
+                self.assertIn('whep_port="${WHEP_PROXY_PORT:-8080}"', run_text)
+                self.assertIn("whep_port_is_open() {", run_text)
+                self.assertIn('sock.connect(("127.0.0.1", port))', run_text)
+                self.assertNotIn("/status/__startup_probe__", run_text)
+                self.assertIn("not starting a duplicate", run_text)
 
     def test_all_ha_dockerfiles_avoid_hidden_env_dependency(self):
         dockerfiles = [
@@ -175,6 +322,31 @@ class TestHomeAssistantAddonPackaging(unittest.TestCase):
                     "go2rtc sidecar should refresh preserved Wyze aliases after fetching the current helper URLs",
                 )
 
+    def test_go2rtc_sidecar_preloads_native_aliases_after_refresh(self):
+        helper_files = [
+            ROOT / "app" / "go2rtc_sidecar.sh",
+            ROOT / "home_assistant" / "app" / "go2rtc_sidecar.sh",
+            ROOT / ".ha_live_addon" / "app" / "go2rtc_sidecar.sh",
+        ]
+
+        expected_snippets = [
+            "preload_go2rtc_aliases()",
+            "curl -sf -X PUT \"${GO2RTC_API_BASE}/api/preload?src=${alias}\"",
+            "Native preload readiness attempt ${attempt}/5",
+            "sleep 60",
+            "start_go2rtc_preload_refresh_loop",
+        ]
+
+        for helper_path in helper_files:
+            helper_text = helper_path.read_text()
+            with self.subTest(helper=str(helper_path.relative_to(ROOT))):
+                for expected in expected_snippets:
+                    self.assertIn(
+                        expected,
+                        helper_text,
+                        "go2rtc sidecar should aggressively warm native aliases and keep refreshing preload state",
+                    )
+
     def test_go2rtc_sidecar_can_skip_helper_disabled_or_unsupported_feeds(self):
         helper_files = [
             ROOT / "app" / "go2rtc_sidecar.sh",
@@ -186,14 +358,17 @@ class TestHomeAssistantAddonPackaging(unittest.TestCase):
             'WB_APP_API_BASE=""',
             'BRIDGE_API_TOKEN=$(WYZE_EMAIL="${WYZE_EMAIL}" python3 - <<\'PY\'',
             'candidate="http://127.0.0.1:${WB_APP_PORT}"',
-            'curl -sf "${candidate}/api?api=${BRIDGE_API_TOKEN}"',
+            'curl -sf -H "api: ${BRIDGE_API_TOKEN}" "${candidate}/api"',
+            'payload = json.loads(os.environ.get("BRIDGE_API_PAYLOAD", ""))',
+            'Bridge catalog ready after ${retry}x2s',
             'WB_APP_API_BASE="${candidate}"',
+            "keeping stale alias fallback",
             'def bridge_published_entries(cam_uri: str):',
             'def bridge_camera_state(cam_uri: str) -> dict:',
             'state["published"] = bool(enabled_entries)',
             'state["hd"] = any(',
             'state["sd"] = any(',
-            'fetch_json(f"{base_url}/api/{cam_path}/stream-config?api={api_token}")',
+            'fetch_json(f"{base_url}/api/{cam_path}/stream-config", api_token=api_token)',
             'bridge_catalog_empty = isinstance(catalog, dict) and not catalog',
             'if bridge_catalog_empty:',
             'published = None',
@@ -223,6 +398,16 @@ class TestHomeAssistantAddonPackaging(unittest.TestCase):
                         helper_text,
                         "go2rtc sidecar should honor explicit helper feed flags and avoid fake native aliases for unsupported feeds",
                     )
+                self.assertNotIn(
+                    "api={api_token}",
+                    helper_text,
+                    "bridge API filtering should use the api header so keys are not logged in request URLs",
+                )
+                self.assertNotIn(
+                    "api=${BRIDGE_API_TOKEN}",
+                    helper_text,
+                    "sidecar readiness checks should use the api header so keys are not logged in request URLs",
+                )
 
     def test_public_go2rtc_sidecars_use_configured_lan_ip_overrides(self):
         helper_files = [
@@ -234,9 +419,37 @@ class TestHomeAssistantAddonPackaging(unittest.TestCase):
             helper_text = helper_path.read_text()
             with self.subTest(helper=str(helper_path.relative_to(ROOT))):
                 self.assertIn("GO2RTC_LAN_IP_OVERRIDES", helper_text)
+                self.assertIn("GO2RTC_FORCE_LAN_IP_OVERRIDES", helper_text)
+                self.assertIn('/data/options.json", encoding="utf-8"', helper_text)
                 self.assertIn("def normalize_mac(value: str) -> str:", helper_text)
+                self.assertIn("def camera_mac(cam: dict) -> str:", helper_text)
+                self.assertIn("urllib.parse.parse_qs(parsed.query)", helper_text)
                 self.assertNotIn("80482C31C9E7", helper_text)
                 self.assertNotIn("192.168.1.177", helper_text)
+
+    def test_go2rtc_sidecar_does_not_override_private_helper_hosts_by_default(self):
+        helper_files = [
+            ROOT / "app" / "go2rtc_sidecar.sh",
+            ROOT / "home_assistant" / "app" / "go2rtc_sidecar.sh",
+            ROOT / ".ha_live_addon" / "app" / "go2rtc_sidecar.sh",
+        ]
+
+        expected_snippets = [
+            "def is_private_lan_host(host: str) -> bool:",
+            'if is_private_lan_host(parsed.hostname or "") and not force_lan_ip_overrides():',
+            "keeping helper LAN host",
+            "GO2RTC_FORCE_LAN_IP_OVERRIDES",
+        ]
+
+        for helper_path in helper_files:
+            helper_text = helper_path.read_text()
+            with self.subTest(helper=str(helper_path.relative_to(ROOT))):
+                for expected in expected_snippets:
+                    self.assertIn(
+                        expected,
+                        helper_text,
+                        "go2rtc sidecar should not let a stale override replace a current private helper IP unless explicitly forced",
+                    )
 
     def test_root_dockerfiles_download_go2rtc_binary(self):
         dockerfiles = [
@@ -315,6 +528,7 @@ class TestHomeAssistantAddonPackaging(unittest.TestCase):
             "WYZE_PASSWORD": '  WYZE_PASSWORD: ""',
             "API_ID": '  API_ID: ""',
             "API_KEY": '  API_KEY: ""',
+            "SD_ONLY": "  SD_ONLY: false",
         }
         expected_schema = {
             "WYZE_EMAIL": "  WYZE_EMAIL: email",
@@ -351,9 +565,8 @@ class TestHomeAssistantAddonPackaging(unittest.TestCase):
             "  API_KEY: match([a-zA-Z0-9]{60})",
             "  TOTP_KEY: str?",
             "  ON_DEMAND: bool?",
+            "  SD_ONLY: bool?",
             "  ENABLE_AUDIO: bool?",
-            "  QUALITY: str?",
-            "  SUB_QUALITY: str?",
             "  SUBSTREAM: bool?",
             "  NET_MODE: list(LAN|P2P|ANY)?",
             "  FORCE_FPS: int?",
@@ -377,8 +590,10 @@ class TestHomeAssistantAddonPackaging(unittest.TestCase):
                 self.assertIn("      STREAM: list(main|both|sub)?", config_text)
                 self.assertIn("      HD: bool?", config_text)
                 self.assertIn("      SD: bool?", config_text)
-                self.assertIn("      HD_KBPS: int?", config_text)
-                self.assertIn("      SD_KBPS: int?", config_text)
+                self.assertNotIn("      HD_KBPS: int?", config_text)
+                self.assertNotIn("      SD_KBPS: int?", config_text)
+                self.assertNotIn("      QUALITY: str?", config_text)
+                self.assertNotIn("      SUB_QUALITY: str?", config_text)
 
     def test_camera_options_have_nested_translations(self):
         addon_translations = {
@@ -387,14 +602,14 @@ class TestHomeAssistantAddonPackaging(unittest.TestCase):
         }
 
         expected_snippets = [
+            "  SD_ONLY:\n",
+            "    name: SD-only mode\n",
             "  CAM_OPTIONS:\n",
             "    fields:\n",
             "      CAM_NAME:\n",
             "        name: Camera name\n",
             "      HD:\n",
             "        name: Enable HD feed\n",
-            "      SD_KBPS:\n",
-            "        name: SD bitrate target\n",
             "      STREAM:\n",
             "        name: Legacy stream mode\n",
         ]
@@ -440,16 +655,22 @@ class TestHomeAssistantAddonPackaging(unittest.TestCase):
 
         expected_lines = {
             "prod": [
+                "MTX_API=true",
                 "MTX_RTSPADDRESS=:58554",
-                "MTX_HLSADDRESS=:58888",
+                "MTX_HLSADDRESS=:39888",
                 "MTX_WEBRTCADDRESS=:58889",
                 "MTX_APIADDRESS=:59997",
             ],
             "dev": [
-                "MTX_RTSPADDRESS=:59554",
-                "MTX_HLSADDRESS=:59888",
-                "MTX_WEBRTCADDRESS=:59889",
-                "MTX_APIADDRESS=:60997",
+                "WHEP_PROXY_PORT=18080",
+                "KVS_CONFIG_PORT=55000",
+                "MTX_API=true",
+                "MTX_RTSPADDRESS=:28554",
+                "MTX_RTPADDRESS=:28000",
+                "MTX_RTCPADDRESS=:28001",
+                "MTX_HLSADDRESS=:28888",
+                "MTX_WEBRTCADDRESS=:28889",
+                "MTX_APIADDRESS=:29997",
             ],
         }
 

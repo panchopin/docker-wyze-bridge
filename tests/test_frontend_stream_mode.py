@@ -6,8 +6,13 @@ import sys
 import types
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "app"))
+APP_DIR = pathlib.Path(__file__).resolve().parent.parent / "app"
+APP_DIR_STR = str(APP_DIR)
+while APP_DIR_STR in sys.path:
+    sys.path.remove(APP_DIR_STR)
+sys.path.insert(0, APP_DIR_STR)
 
 sys.modules.setdefault("xxtea", types.ModuleType("xxtea"))
 
@@ -185,6 +190,9 @@ import frontend
 
 class TestFrontendStreamMode(unittest.TestCase):
     def create_client(self):
+        while APP_DIR_STR in sys.path:
+            sys.path.remove(APP_DIR_STR)
+        sys.path.insert(0, APP_DIR_STR)
         sys.modules["wyze_bridge"] = fake_wyze_bridge
         importlib.reload(frontend)
         frontend.WbAuth.enabled = False
@@ -377,6 +385,111 @@ class TestFrontendStreamMode(unittest.TestCase):
             payload["cameras"]["north-yard"]["rtsp_url"],
             "rtsp://localhost:19554/north-yard-sd",
         )
+
+    def test_api_returns_loading_when_catalog_has_not_populated_yet(self):
+        client = self.create_client()
+
+        with patch.object(FakeBridge, "camera_catalog", return_value={}):
+            response = client.get("/api")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {"status": "loading"})
+
+    def test_api_ready_returns_loading_until_native_aliases_are_seeded(self):
+        client = self.create_client()
+        catalog = {
+            "north-yard": {
+                "native_selected": True,
+                "native_alias": "north-yard",
+                "source": "go2rtc",
+            }
+        }
+
+        with (
+            patch.object(FakeBridge, "camera_catalog", return_value=catalog),
+            patch(
+                "frontend.go2rtc_probe",
+                return_value={"api": {"reachable": True}, "aliases": []},
+            ),
+        ):
+            response = client.get("/api/ready")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json(), {"status": "loading"})
+
+    def test_api_ready_returns_loading_when_go2rtc_probe_errors(self):
+        client = self.create_client()
+        catalog = {
+            "north-yard": {
+                "native_selected": True,
+                "native_alias": "north-yard",
+                "source": "go2rtc",
+            }
+        }
+
+        with (
+            patch.object(FakeBridge, "camera_catalog", return_value=catalog),
+            patch("frontend.go2rtc_probe", side_effect=RuntimeError("probe failed")),
+        ):
+            response = client.get("/api/ready")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json(), {"status": "loading"})
+
+    def test_api_ready_returns_ready_when_catalog_and_aliases_are_present(self):
+        client = self.create_client()
+        catalog = {
+            "north-yard": {
+                "native_selected": True,
+                "native_alias": "north-yard",
+                "source": "go2rtc",
+            }
+        }
+
+        with (
+            patch.object(FakeBridge, "camera_catalog", return_value=catalog),
+            patch(
+                "frontend.go2rtc_probe",
+                return_value={
+                    "api": {"reachable": True},
+                    "aliases": ["north-yard", "north-yard-sd"],
+                },
+            ),
+        ):
+            response = client.get("/api/ready")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {"status": "ready"})
+
+    def test_api_ready_ignores_native_alias_when_sd_feed_fell_back_to_bridge(self):
+        client = self.create_client()
+        catalog = {
+            "north-yard": {
+                "native_selected": True,
+                "native_alias": "north-yard",
+                "source": "kvs",
+            }
+        }
+
+        with (
+            patch.object(FakeBridge, "camera_catalog", return_value=catalog),
+            patch(
+                "frontend.go2rtc_probe",
+                return_value={"api": {"reachable": True}, "aliases": []},
+            ),
+        ):
+            response = client.get("/api/ready")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {"status": "ready"})
+
+    def test_api_ready_never_falls_through_to_camera_lookup(self):
+        client = self.create_client()
+
+        response = client.get("/api/ready")
+
+        self.assertNotIn("Could not find camera [ready]", response.get_data(as_text=True))
+        self.assertIn(response.get_json()["status"], {"loading", "ready"})
 
     def test_native_only_camera_uses_image_preview_when_video_enabled(self):
         FakeBridge.stream_config = {

@@ -11,8 +11,9 @@ sys.path.insert(
     0, str(pathlib.Path(__file__).resolve().parent.parent / ".ha_live_addon" / "app")
 )
 
-from wyzecam.api import get_camera_stream
+import wyzecam.api as wyzecam_api_module
 from wyzecam.api_models import WyzeCamera
+import wyzebridge.wyze_api as wyze_api_module
 from wyzebridge.wyze_api import WyzeApi
 
 
@@ -93,12 +94,12 @@ class TestKVSTraceLogging(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {"KVS_TRACE_STREAM": "north-yard"}, clear=False),
-            patch("wyzecam.api.sign_payload", return_value={}),
-            patch("wyzecam.api.post", return_value=DummyResponse()),
-            patch("wyzecam.api.validate_resp", return_value=[stream_info]),
-            patch("wyzecam.api.logger.info") as log_info,
+            patch.object(wyzecam_api_module, "sign_payload", return_value={}),
+            patch.object(wyzecam_api_module, "post", return_value=DummyResponse()),
+            patch.object(wyzecam_api_module, "validate_resp", return_value=[stream_info]),
+            patch.object(wyzecam_api_module.logger, "info") as log_info,
         ):
-            stream = get_camera_stream(auth, camera)
+            stream = wyzecam_api_module.get_camera_stream(auth, camera)
 
         self.assertEqual(stream.device_id, camera.mac)
         messages = [call.args[0] for call in log_info.call_args_list]
@@ -119,8 +120,8 @@ class TestKVSTraceLogging(unittest.TestCase):
             patch.dict(os.environ, {"KVS_TRACE_STREAM": "north-yard"}, clear=False),
             patch.object(WyzeApi, "get_camera", return_value=camera),
             patch.object(WyzeApi, "_maybe_wake_kvs_camera"),
-            patch("wyzebridge.wyze_api.get_camera_stream", return_value=FakeStream()),
-            patch("wyzebridge.wyze_api.logger.info") as log_info,
+            patch.object(wyze_api_module, "get_camera_stream", return_value=FakeStream()),
+            patch.object(wyze_api_module.logger, "info") as log_info,
         ):
             config = api.get_kvs_proxy_config("north-yard-sub")
 

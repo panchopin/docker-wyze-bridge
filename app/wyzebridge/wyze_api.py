@@ -2,10 +2,8 @@ import contextlib
 import json
 import pickle
 from urllib.parse import urlsplit
-from datetime import datetime
 from functools import wraps
-from os import environ, utime
-from os.path import getmtime
+from os import environ
 from pathlib import Path
 from time import sleep, time
 from typing import Any, Callable, Optional
@@ -33,9 +31,15 @@ from wyzebridge.auth import get_secret
 from wyzebridge.bridge_utils import env_bool, env_cam, env_list
 from wyzebridge.config import IMG_PATH, MOTION, TOKEN_PATH
 from wyzebridge.logging import logger
-from wyzebridge.preview_validation import preview_bytes_are_valid_image, preview_file_is_image
+from wyzebridge.preview_validation import (
+    preview_bytes_are_valid_image,
+    preview_file_is_image,
+    preview_payload_matches_existing,
+    record_preview_hash,
+)
 
 API_THUMBNAIL_MAX_AGE = int(environ.get("API_THUMBNAIL_MAX_AGE", "300"))
+WHEP_PROXY_PORT = environ.get("WHEP_PROXY_PORT", "8080")
 
 import wyzecam.api as wyzecam_api_module
 
@@ -373,14 +377,6 @@ class WyzeApi:
             with contextlib.suppress(OSError):
                 save_path.unlink()
 
-        with contextlib.suppress(FileNotFoundError):
-            if cached_valid and s3_timestamp and s3_timestamp <= int(getmtime(save_to)):
-                if time() - getmtime(save_to) <= API_THUMBNAIL_MAX_AGE:
-                    logger.debug(f"[API] Using recent cached thumbnail for {uri}")
-                    return True
-                logger.debug(f"[API] Thumbnail for {uri} is unchanged and stale; keeping existing preview")
-                return False
-
         logger.info(f'☁️ Pulling "{uri}" thumbnail to {save_to}')
 
         try:
@@ -396,20 +392,13 @@ class WyzeApi:
                 return False
 
             temp_path = save_path.with_name(save_path.name + ".tmp")
-            if cached_valid and save_path.read_bytes() == img.content:
+            if cached_valid and preview_payload_matches_existing(save_path, img.content):
                 logger.debug(f"[API] Downloaded thumbnail for {uri} matched existing preview")
                 return False
             with temp_path.open("wb") as handle:
                 handle.write(img.content)
             temp_path.replace(save_path)
-
-            if modified := s3_timestamp or img.headers.get("Last-Modified"):
-                ts_format = "%a, %d %b %Y %H:%M:%S %Z"
-
-                if isinstance(modified, int):
-                    utime(save_to, (modified, modified))
-                elif ts := int(datetime.strptime(modified, ts_format).timestamp()):
-                    utime(save_to, (ts, ts))
+            record_preview_hash(save_path, img.content, camera=uri, source="wyze-api")
 
             return True
         except Exception as ex:
@@ -459,7 +448,7 @@ class WyzeApi:
             return {"result": str(ex), "cam": cam_name}
 
     def _maybe_wake_kvs_camera(self, cam: WyzeCamera) -> None:
-        if cam.product_model not in {"LD_CFP", "HL_CAM4", "WYZE_CAKP2JFUS"}:
+        if cam.product_model not in {"LD_CFP", "HL_CAM4", "HL_BC", "WYZE_CAKP2JFUS"}:
             return
         wake_key = cam.name_uri
         now = time()
@@ -496,6 +485,8 @@ class WyzeApi:
                 f"[API] Camera is not KVS in get_kvs_proxy_config(): {stream_name}"
             )
             return None
+        if cam.product_model == "HL_BC" and not substream:
+            quality = env_cam("sub_quality", stream_name, "sd30")
         self._maybe_wake_kvs_camera(cam)
         if cam.product_model in {"LD_CFP", "HL_CAM4"}:
             if not get_camera_stream:
@@ -578,14 +569,14 @@ class WyzeApi:
                             f"failed to build KVS config for {uri}"
                         )
                     response = requests.post(
-                        f"http://127.0.0.1:8080/websocket/{uri}",
+                        f"http://127.0.0.1:{WHEP_PROXY_PORT}/websocket/{uri}",
                         json=kvs_config,
                         headers={"Content-Type": "application/json"},
                         timeout=10,
                     )
                     response.raise_for_status()
                     status = requests.get(
-                        f"http://127.0.0.1:8080/status/{uri}", timeout=2
+                        f"http://127.0.0.1:{WHEP_PROXY_PORT}/status/{uri}", timeout=2
                     )
                     status.raise_for_status()
                     last_error = None

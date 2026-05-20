@@ -368,11 +368,21 @@ class WyzeStream(Stream):
             self.update_cam_info()
         if self.camera.camera_info and "boa_info" in self.camera.camera_info:
             data["boa_url"] = f"http://{self.camera.ip}/cgi-bin/hello.cgi?name=/"
-        return (
-            data
-            | native_stream_info(self.camera, self.options.substream)
-            | self.camera.model_dump(exclude={"p2p_id", "enr", "parent_enr"})
+        native_info = native_stream_info(self.camera, self.options.substream)
+        sd_only_bridge_feed = (
+            env_bool("SD_ONLY", style="bool")
+            and str(self.options.quality or "").lower().startswith("sd")
         )
+        if sd_only_bridge_feed:
+            native_info = native_info | {
+                "native_selected": False,
+                "native_preload": False,
+                "snapshot_source": "rtsp",
+                "talkback_supported": False,
+                "talkback_source": None,
+            }
+
+        return data | native_info | self.camera.model_dump(exclude={"p2p_id", "enr", "parent_enr"})
 
     def update_cam_info(self) -> None:
         if not self.connected:

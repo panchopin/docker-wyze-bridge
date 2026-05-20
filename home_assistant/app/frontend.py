@@ -25,9 +25,13 @@ from wyzebridge.build_config import VERSION
 from wyze_bridge import WyzeBridge
 from wyzebridge import config, web_ui
 from wyzebridge.auth import WbAuth
-from wyzebridge.go2rtc import send_native_talkback
+from wyzebridge.go2rtc import go2rtc_probe, send_native_talkback
 from wyzebridge.camera_settings import set_camera_stream_mode
-from wyzebridge.preview_validation import preview_file_is_image
+from wyzebridge.preview_validation import (
+    preview_file_is_image,
+    read_snapshot_hash_registry,
+    snapshot_hash_entry,
+)
 from wyzebridge.web_ui import url_for
 
 WYZE_DNS_URLS = (
@@ -234,6 +238,37 @@ def create_app():
             return wb.camera_info(cam_name)
         return wb.streams.get_info(cam_name)
 
+    def catalog_loading(cameras: dict | None = None) -> bool:
+        return bool(wb.api.total_cams and not (cameras if cameras is not None else camera_catalog()))
+
+    def ready_response(cameras: dict | None = None) -> tuple[dict, int]:
+        catalog = cameras if cameras is not None else camera_catalog()
+        if catalog_loading(catalog):
+            return {"status": "loading"}, 503
+
+        expected_aliases = {
+            camera.get("native_alias")
+            for camera in catalog.values()
+            if isinstance(camera, dict)
+            and camera.get("native_selected")
+            and camera.get("native_alias")
+            and camera.get("source") == "go2rtc"
+        }
+        try:
+            probe = go2rtc_probe(timeout=0.5, include_streams=bool(expected_aliases))
+        except Exception:
+            return {"status": "loading"}, 503
+        if not probe.get("api", {}).get("reachable"):
+            return {"status": "loading"}, 503
+
+        aliases = probe.get("aliases")
+        if expected_aliases:
+            alias_set = set(aliases) if isinstance(aliases, list) else set()
+            if not expected_aliases.issubset(alias_set):
+                return {"status": "loading"}, 503
+
+        return {"status": "ready"}, 200
+
     def auth_required(view):
         @wraps(view)
         def wrapped_view(*args, **kwargs):
@@ -385,7 +420,24 @@ def create_app():
     @app.route("/api")
     @auth_required
     def api_all_cams():
-        return web_ui.all_cams(wb.streams, wb.api.total_cams, cameras=camera_catalog())
+        cameras = camera_catalog()
+        if catalog_loading(cameras):
+            return {"status": "loading"}
+        return web_ui.all_cams(wb.streams, wb.api.total_cams, cameras=cameras)
+
+    @app.route("/api/ready")
+    @auth_required
+    def api_ready():
+        payload, status = ready_response(camera_catalog())
+        return payload, status
+
+    @app.route("/api/snapshot-hashes")
+    @auth_required
+    def api_snapshot_hashes():
+        return {
+            "registry": read_snapshot_hash_registry(config.IMG_PATH),
+            "source": config.IMG_PATH,
+        }
 
     @app.route("/api/<string:cam_name>")
     @auth_required
@@ -555,7 +607,9 @@ def create_app():
                     os.remove(img_path)
                 raise NotFound
             if exp := request.args.get("exp"):
-                created_at = os.path.getmtime(img_path)
+                created_at = snapshot_hash_entry(config.IMG_PATH, Path(img_file).stem).get(
+                    "recorded_at", 0
+                )
                 if time.time() - created_at > int(exp):
                     raise NotFound
             return send_from_directory(config.IMG_PATH, img_file)
@@ -620,7 +674,7 @@ def create_app():
         """
         Generate an m3u8 playlist with all enabled cameras.
         """
-        hostname = request.host.split(":")[0]
+        hostname = request.host
         cameras = web_ui.format_streams(wb.streams.get_all_cam_info())
         resp = make_response(
             render_template("m3u8.html", cameras=cameras, hostname=hostname)

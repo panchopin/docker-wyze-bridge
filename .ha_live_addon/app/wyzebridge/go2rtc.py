@@ -13,12 +13,18 @@ import requests
 
 from wyzebridge.config import IMG_PATH, IMG_TYPE
 from wyzebridge.logging import logger
-from wyzebridge.preview_validation import preview_bytes_are_valid_image
+from wyzebridge.preview_validation import (
+    preview_bytes_are_valid_image,
+    preview_payload_matches_existing,
+    record_preview_hash,
+)
 
 DEFAULT_GO2RTC_API_PORT = 11984
 DEFAULT_GO2RTC_RTSP_PORT = 19554
 _NATIVE_ALIAS_READY_CACHE_TTL = 10.0
 _NATIVE_ALIAS_READY_CACHE: dict[str, tuple[float, bool]] = {}
+_GO2RTC_API_REACHABLE_CACHE_TTL = 5.0
+_GO2RTC_API_REACHABLE_CACHE: dict[int, tuple[float, bool]] = {}
 _VALIDATED_NATIVE_MODELS = {
     "HL_CAM3P": {
         "reason": "HL_CAM3P validated on native go2rtc for the SD feed while the main alias remains unproven on this host",
@@ -28,6 +34,7 @@ _VALIDATED_NATIVE_MODELS = {
     "HL_CAM4": {
         "reason": "HL_CAM4 validated on native go2rtc with higher-resolution main stream",
         "selected": True,
+        "sub_selected": True,
     },
     "HL_BC": {
         "reason": "HL_BC stays bridge-first because native go2rtc still validated at 640x360",
@@ -64,10 +71,7 @@ def native_snapshot_path(cam_name: str) -> Path:
 
 
 def _content_matches_existing(output_path: Path, content: bytes) -> bool:
-    try:
-        return output_path.exists() and output_path.read_bytes() == content
-    except OSError:
-        return False
+    return preview_payload_matches_existing(output_path, content)
 
 
 def _validated_native_model(camera) -> dict[str, Any] | None:
@@ -75,15 +79,27 @@ def _validated_native_model(camera) -> dict[str, Any] | None:
 
 
 def _go2rtc_api_reachable(timeout: float = 0.75) -> bool:
+    now = time.monotonic()
+    port = _go2rtc_api_port()
+    cached = _GO2RTC_API_REACHABLE_CACHE.get(port)
+    if cached and now - cached[0] < _GO2RTC_API_REACHABLE_CACHE_TTL:
+        return cached[1]
+
+    reachable = False
     try:
         response = requests.get(f"{go2rtc_api_base()}/api", timeout=timeout)
         response.raise_for_status()
-        return True
+        reachable = True
     except requests.RequestException:
-        return False
+        reachable = False
+    if reachable:
+        _GO2RTC_API_REACHABLE_CACHE[port] = (now, True)
+    else:
+        _GO2RTC_API_REACHABLE_CACHE.pop(port, None)
+    return reachable
 
 
-def _native_alias_is_ready(alias: str, timeout: float = 2.0) -> bool:
+def _native_alias_is_ready(alias: str, timeout: float = 0.25) -> bool:
     now = time.monotonic()
     cached = _NATIVE_ALIAS_READY_CACHE.get(alias)
     if cached and now - cached[0] < _NATIVE_ALIAS_READY_CACHE_TTL:
@@ -212,7 +228,12 @@ def preload_native_stream(alias: str, timeout: float = 2.0) -> dict[str, Any]:
     return result
 
 
-def write_native_snapshot(alias: str, cam_name: str, timeout: float = 15.0) -> bool:
+def write_native_snapshot(
+    alias: str,
+    cam_name: str,
+    timeout: float = 15.0,
+    warn_on_failure: bool = True,
+) -> bool:
     output_path = native_snapshot_path(cam_name)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     deadline = time.monotonic() + timeout
@@ -224,11 +245,11 @@ def write_native_snapshot(alias: str, cam_name: str, timeout: float = 15.0) -> b
                 timeout=max(0.5, min(5.0, deadline - time.monotonic())),
             )
             if response.status_code == 503:
-                last_error = "status=503"
-                time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
-                continue
+                logger.debug(f"[{cam_name}] Native snapshot from {alias} not ready: status=503; falling back")
+                return False
             if response.status_code == 404:
-                logger.warning(f"❗ [{cam_name}] Native snapshot from {alias} failed: status=404")
+                log = logger.warning if warn_on_failure else logger.debug
+                log(f"❗ [{cam_name}] Native snapshot from {alias} failed: status=404")
                 return False
             response.raise_for_status()
             if not response.content:
@@ -236,18 +257,25 @@ def write_native_snapshot(alias: str, cam_name: str, timeout: float = 15.0) -> b
                 time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
                 continue
             if not preview_bytes_are_valid_image(response.content):
-                logger.warning(f"❗ [{cam_name}] Native snapshot from {alias} was not a valid image")
+                log = logger.warning if warn_on_failure else logger.debug
+                log(f"❗ [{cam_name}] Native snapshot from {alias} was not a valid image")
                 return False
             if _content_matches_existing(output_path, response.content):
                 last_error = "matched existing preview"
                 time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
                 continue
             output_path.write_bytes(response.content)
+            record_preview_hash(
+                output_path,
+                response.content,
+                camera=cam_name,
+                source=f"go2rtc:{alias}",
+            )
             return output_path.stat().st_size > 0
         except (requests.RequestException, OSError) as ex:
             last_error = f"{type(ex).__name__}: {ex}"
             time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
-    logger.warning(f"❗ [{cam_name}] Native snapshot from {alias} failed: {last_error}")
+    logger.debug(f"[{cam_name}] Native snapshot from {alias} did not produce a fresh frame before fallback: {last_error}")
     return False
 
 

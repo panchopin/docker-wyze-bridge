@@ -91,6 +91,25 @@ class TestFrontendImageRoute(unittest.TestCase):
             self.assertIn("/static/notavailable.svg", response.location)
             self.assertFalse(image_path.exists())
 
+    def test_snapshot_hash_registry_endpoint_returns_hashes(self):
+        client = self.create_client()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            registry_path = pathlib.Path(temp_dir) / ".snapshot_hashes.json"
+            registry_path.write_text(
+                '{"garage":{"sha256":"abc123","bytes":42,"source":"test","recorded_at":1}}\n',
+                encoding="utf-8",
+            )
+
+            with (
+                patch.object(frontend.config, "IMG_PATH", temp_dir + "/"),
+                patch.object(frontend.web_ui.auth, "login_required", side_effect=lambda fn: fn),
+            ):
+                response = client.get("/api/snapshot-hashes")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.get_json()["registry"]["garage"]["sha256"], "abc123")
+
 
 if __name__ == "__main__":
     unittest.main()

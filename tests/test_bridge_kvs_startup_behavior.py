@@ -224,6 +224,90 @@ class TestBridgeKVSStartupBehavior(unittest.TestCase):
         self.assertTrue(config["feeds"]["sd"]["enabled"])
         self.assertEqual(config["feeds"]["sd"]["path"], "sub")
 
+    def test_camera_feed_config_sd_only_forces_single_sd_feed(self):
+        sys.modules.pop("wyze_bridge", None)
+        reset_wyzecam_modules()
+        with patch("os.makedirs"):
+            WyzeBridge = importlib.import_module("wyze_bridge").WyzeBridge
+
+        bridge = WyzeBridge.__new__(WyzeBridge)
+        bridge.camera_feed_resolution = (
+            lambda camera, feed: "2560x1440" if feed == "hd" else "640x360"
+        )
+
+        def saved_setting(_cam, key, default=""):
+            return {"hd": True, "sd": False}.get(key, default)
+
+        with (
+            patch("wyze_bridge.get_camera_setting", side_effect=saved_setting),
+            patch("wyze_bridge.native_stream_info", side_effect=fake_native_stream_info),
+            patch.dict("os.environ", {"SD_ONLY": "true", "GO2RTC_RTSP_PORT": "19554"}, clear=False),
+        ):
+            bridge.streams = FakeStreams()
+            config = bridge.camera_feed_config(make_camera())
+
+        self.assertTrue(config["sd_only"])
+        self.assertEqual(config["mode"], "sub")
+        self.assertFalse(config["feeds"]["hd"]["enabled"])
+        self.assertFalse(config["feeds"]["hd"]["supported"])
+        self.assertIn("SD_ONLY", config["feeds"]["hd"]["reason"])
+        self.assertTrue(config["feeds"]["sd"]["enabled"])
+
+    def test_apply_camera_stream_config_rejects_hd_when_sd_only(self):
+        sys.modules.pop("wyze_bridge", None)
+        reset_wyzecam_modules()
+        with patch("os.makedirs"):
+            WyzeBridge = importlib.import_module("wyze_bridge").WyzeBridge
+
+        bridge = WyzeBridge.__new__(WyzeBridge)
+        bridge.camera_feed_resolution = (
+            lambda camera, feed: "2560x1440" if feed == "hd" else "640x360"
+        )
+
+        with (
+            patch("wyze_bridge.get_camera_setting", side_effect=lambda _cam, _key, default="": default),
+            patch("wyze_bridge.native_stream_info", side_effect=fake_native_stream_info),
+            patch.dict("os.environ", {"SD_ONLY": "true"}, clear=False),
+        ):
+            bridge.streams = FakeStreams()
+            with self.assertRaisesRegex(ValueError, "SD_ONLY"):
+                bridge.apply_camera_stream_config(
+                    make_camera(),
+                    {"hd_enabled": True, "sd_enabled": True, "hd_kbps": 180, "sd_kbps": 30},
+                )
+
+    def test_camera_feed_config_keeps_hl_bc_sd_on_main_path(self):
+        sys.modules.pop("wyze_bridge", None)
+        reset_wyzecam_modules()
+        with patch("os.makedirs"):
+            WyzeBridge = importlib.import_module("wyze_bridge").WyzeBridge
+
+        bridge = WyzeBridge.__new__(WyzeBridge)
+        bridge.camera_feed_resolution = (
+            lambda camera, feed: "2560x1440" if feed == "hd" else "640x360"
+        )
+
+        with (
+            patch("wyze_bridge.get_camera_setting", side_effect=lambda _cam, _key, default="": default),
+            patch("wyze_bridge.native_stream_info", side_effect=fake_native_stream_info),
+            patch.dict(
+                "os.environ",
+                {
+                    "HD_NORTH_YARD": "False",
+                    "SD_NORTH_YARD": "True",
+                    "GO2RTC_RTSP_PORT": "19554",
+                },
+                clear=False,
+            ),
+        ):
+            bridge.streams = FakeStreams()
+            config = bridge.camera_feed_config(make_camera(model="HL_BC", nickname="South Yard"))
+
+        self.assertEqual(config["mode"], "sub")
+        self.assertFalse(config["feeds"]["hd"]["enabled"])
+        self.assertTrue(config["feeds"]["sd"]["enabled"])
+        self.assertEqual(config["feeds"]["sd"]["path"], "main")
+
     def test_camera_feed_config_lets_explicit_env_override_saved_feed_settings(self):
         sys.modules.pop("wyze_bridge", None)
         reset_wyzecam_modules()
@@ -349,6 +433,38 @@ class TestBridgeKVSStartupBehavior(unittest.TestCase):
         self.assertFalse(config["feeds"]["hd"]["enabled"])
         self.assertEqual(config["feeds"]["sd"]["path"], "sub")
 
+    def test_camera_feed_config_keeps_native_sd_alias_for_hl_cam4_preview_refresh(self):
+        sys.modules.pop("wyze_bridge", None)
+        reset_wyzecam_modules()
+        with patch("os.makedirs"):
+            WyzeBridge = importlib.import_module("wyze_bridge").WyzeBridge
+
+        bridge = WyzeBridge.__new__(WyzeBridge)
+        bridge.camera_hd_supported = lambda camera: True
+        bridge.camera_sd_supported = lambda camera: True
+        bridge.camera_feed_resolution = (
+            lambda camera, feed: "2560x1440" if feed == "hd" else "640x360"
+        )
+
+        def fake_dual_native_stream_info(camera, substream=False):
+            info = fake_native_stream_info(camera, substream=substream)
+            info["native_selected"] = False
+            info["snapshot_source"] = "rtsp"
+            return info
+
+        with (
+            patch("wyze_bridge.get_camera_setting", side_effect=lambda _cam, _key, default="": default),
+            patch("wyze_bridge.native_stream_info", side_effect=fake_dual_native_stream_info),
+            patch.dict("os.environ", {"GO2RTC_RTSP_PORT": "19554"}, clear=False),
+        ):
+            bridge.streams = FakeStreams()
+            config = bridge.camera_feed_config(make_camera())
+
+        self.assertEqual(config["mode"], "main")
+        self.assertEqual(config["feeds"]["hd"]["path"], "main")
+        self.assertFalse(config["feeds"]["sd"]["enabled"])
+        self.assertTrue(config["native_preview_sd"])
+
     def test_setup_streams_does_not_eagerly_start_kvs_proxy(self):
         sys.modules.pop("wyze_bridge", None)
         reset_wyzecam_modules()
@@ -408,6 +524,37 @@ class TestBridgeKVSStartupBehavior(unittest.TestCase):
 
         self.assertEqual(len(bridge.streams.added), 1)
         self.assertEqual(bridge.streams.added[0].uri, "north-yard-sub")
+        self.assertEqual(bridge.mtx.paths, [("north-yard-sub", True, False)])
+
+    def test_setup_streams_sd_only_creates_one_sd_stream(self):
+        sys.modules.pop("wyze_bridge", None)
+        reset_wyzecam_modules()
+        with patch("os.makedirs"):
+            wyze_bridge = importlib.import_module("wyze_bridge")
+            WyzeBridge = wyze_bridge.WyzeBridge
+
+        bridge = WyzeBridge.__new__(WyzeBridge)
+        bridge.api = SimpleNamespace(
+            get_user=lambda: SimpleNamespace(email="test@example.com"),
+            filtered_cams=lambda: [make_camera()],
+        )
+        bridge.streams = FakeStreams()
+        bridge.mtx = FakeMtx()
+
+        with (
+            patch("wyze_bridge.WyzeStream", FakeStream),
+            patch("wyze_bridge.native_stream_info", side_effect=fake_native_stream_info),
+            patch("wyze_bridge.get_camera_setting", side_effect=lambda _cam, _key, default="": default),
+            patch("wyze_bridge.env_cam", side_effect=lambda key, name_uri, default=None, style="": default),
+            patch("wyze_bridge.is_livestream", return_value=False),
+            patch("wyze_bridge.ON_DEMAND", True),
+            patch.dict("os.environ", {"SD_ONLY": "true", "GO2RTC_RTSP_PORT": "19554"}, clear=False),
+        ):
+            bridge.setup_streams(SimpleNamespace(email="test@example.com"))
+
+        self.assertEqual(len(bridge.streams.added), 1)
+        self.assertEqual(bridge.streams.added[0].uri, "north-yard-sub")
+        self.assertEqual(bridge.streams.added[0].options.quality, "sd30")
         self.assertEqual(bridge.mtx.paths, [("north-yard-sub", True, False)])
 
     def test_setup_streams_honors_both_mode(self):
@@ -543,7 +690,43 @@ class TestBridgeKVSStartupBehavior(unittest.TestCase):
             bridge.setup_streams(SimpleNamespace(email="test@example.com"))
 
         self.assertEqual([stream.uri for stream in bridge.streams.added], ["north-yard"])
+        self.assertEqual(bridge.streams.added[0].options.quality, "sd30")
         self.assertEqual(bridge.mtx.paths, [("north-yard", True, True)])
+
+    def test_sd_only_kvs_camera_uses_bridge_main_when_native_sd_alias_not_ready(self):
+        sys.modules.pop("wyze_bridge", None)
+        reset_wyzecam_modules()
+        with patch("os.makedirs"):
+            wyze_bridge = importlib.import_module("wyze_bridge")
+            WyzeBridge = wyze_bridge.WyzeBridge
+
+        bridge = WyzeBridge.__new__(WyzeBridge)
+        bridge.streams = FakeStreams()
+        camera = make_camera(model="HL_CAM3P", nickname="Hamster")
+        camera.name_uri = "hamster"
+
+        def native_info(_camera, substream=False):
+            return {
+                "native_supported": True,
+                "native_selected": bool(substream),
+                "native_alias": "hamster-sd" if substream else "hamster",
+                "native_alias_ready": False,
+                "native_api_reachable": True,
+                "native_rtsp_url": "rtsp://127.0.0.1:19554/hamster-sd",
+                "snapshot_source": "go2rtc",
+            }
+
+        with (
+            patch("wyze_bridge.native_stream_info", side_effect=native_info),
+            patch.dict("os.environ", {"SD_ONLY": "true", "GO2RTC_RTSP_PORT": "19554"}, clear=False),
+            patch("wyze_bridge.env_cam", side_effect=lambda key, name_uri, default=None, style="": default),
+            patch("wyze_bridge.get_camera_setting", side_effect=lambda _cam, _key, default="": default),
+        ):
+            config = bridge.camera_stream_config(camera)
+
+        self.assertEqual(config["feeds"]["sd"]["path"], "main")
+        self.assertTrue(config["feeds"]["sd"]["enabled"])
+        self.assertFalse(config["feeds"]["hd"]["enabled"])
 
     def test_camera_substream_enabled_rejects_sub_mode_on_unsupported_camera(self):
         sys.modules.pop("wyze_bridge", None)

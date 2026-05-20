@@ -30,7 +30,7 @@ load_go2rtc_runtime_env() {
         set_env_if_empty_from_options_json "${key}"
     done
 
-    for key in WB_IP DOMAIN WB_RTSP_URL WB_WEBRTC_URL WB_HLS_URL; do
+    for key in WB_IP DOMAIN WB_RTSP_URL WB_WEBRTC_URL WB_HLS_URL GO2RTC_LAN_IP_OVERRIDES GO2RTC_FORCE_LAN_IP_OVERRIDES; do
         set_env_if_empty_from_options_json "${key}"
     done
 }
@@ -43,6 +43,34 @@ go2rtc_sidecar_cleanup() {
     if [ -n "${GO2RTC_CLEANUP_PID}" ]; then
         kill "${GO2RTC_CLEANUP_PID}" 2>/dev/null || true
     fi
+}
+
+start_go2rtc_process() {
+    nohup sh -c '
+child=""
+stop() {
+    if [ -n "${child}" ]; then
+        kill "${child}" 2>/dev/null || true
+        wait "${child}" 2>/dev/null || true
+    fi
+    exit 0
+}
+trap stop TERM INT
+while :; do
+    go2rtc -config "${GO2RTC_CONFIG}" >> /tmp/go2rtc.log 2>&1 &
+    child=$!
+    wait "${child}"
+    status=$?
+    child=""
+    echo "[GO2RTC] process exited status=${status}; restarting in 2s" >> /tmp/go2rtc.log
+    sleep 2 &
+    child=$!
+    wait "${child}"
+    child=""
+done
+' </dev/null >/dev/null 2>&1 &
+    GO2RTC_PID=$!
+    printf '%s\n' "${GO2RTC_PID}" > "${GO2RTC_PID_FILE}"
 }
 
 normalize_go2rtc_config() {
@@ -90,6 +118,49 @@ path.write_text("\n".join(prefix + kept).rstrip() + "\n", encoding="utf-8")
 PY
 }
 
+preload_go2rtc_aliases() {
+    if [ -z "${GO2RTC_API_BASE}" ]; then
+        return
+    fi
+
+    python3 - <<'PY' | while IFS= read -r alias; do
+import os
+from pathlib import Path
+
+path = Path(os.environ["GO2RTC_CONFIG"])
+in_streams = False
+for line in path.read_text(encoding="utf-8").splitlines():
+    if line == "streams:":
+        in_streams = True
+        continue
+    if in_streams and line and not line.startswith((" ", "\t")):
+        break
+    if not in_streams:
+        continue
+    if line.startswith("  ") and line.rstrip().endswith(":") and not line.startswith("    "):
+        print(line.strip()[:-1])
+PY
+        [ -n "${alias}" ] || continue
+        echo "[GO2RTC] Preloading native alias ${alias}" >&2
+        curl -sf -X PUT "${GO2RTC_API_BASE}/api/preload?src=${alias}" >/dev/null 2>&1 || true
+    done
+
+    for attempt in 1 2 3 4 5; do
+        sleep 2
+        ready=$(curl -sf -X OPTIONS "${GO2RTC_API_BASE}/api/streams" 2>/dev/null | python3 -c "import json, sys; data = json.load(sys.stdin); print(','.join(sorted(name for name, details in data.items() if isinstance(details, dict) and details.get('producers'))))" 2>/dev/null || true)
+        echo "[GO2RTC] Native preload readiness attempt ${attempt}/5 active=${ready:-none}" >&2
+    done
+}
+
+start_go2rtc_preload_refresh_loop() {
+    (
+        while :; do
+            sleep 60
+            preload_go2rtc_aliases
+        done
+    ) &
+}
+
 start_go2rtc_sidecar() {
     if [ -x /config/go2rtc ] && ! command -v go2rtc >/dev/null 2>&1; then
         export PATH="/config:$PATH"
@@ -100,7 +171,7 @@ start_go2rtc_sidecar() {
     GO2RTC_BIN=$(command -v go2rtc 2>/dev/null || echo "NOT_FOUND")
     echo "[GO2RTC_DEBUG] binary=${GO2RTC_BIN} email_set=$([ -n "${WYZE_EMAIL}" ] && echo yes || echo no) secrets_dir=$(ls /run/secrets/ 2>/dev/null | tr '\n' ',' || echo NONE)" >&2
 
-    trap go2rtc_sidecar_cleanup EXIT TERM INT
+    trap go2rtc_sidecar_cleanup TERM INT
 
     if ! command -v go2rtc >/dev/null 2>&1 || [ -z "${WYZE_EMAIL}" ] || [ -z "${WYZE_PASSWORD}" ]; then
         return
@@ -110,7 +181,7 @@ start_go2rtc_sidecar() {
     : "${GO2RTC_RTSP_PORT:=19554}"
     : "${GO2RTC_CONFIG:=/config/go2rtc_wyze.yaml}"
     : "${GO2RTC_PID_FILE:=/tmp/go2rtc.pid}"
-    : "${WB_APP_PORT:=55000}"
+    : "${WB_APP_PORT:=5000}"
     GO2RTC_HAS_PERSISTED_STREAMS=0
 
     if [ ! -d /config ] && [ "${GO2RTC_CONFIG}" = "/config/go2rtc_wyze.yaml" ]; then
@@ -159,9 +230,7 @@ PY
     normalize_go2rtc_config
 
     echo "[GO2RTC] Starting go2rtc HD sidecar (RTSP :${GO2RTC_RTSP_PORT}, API :${GO2RTC_API_PORT}) config=${GO2RTC_CONFIG}" >&2
-    go2rtc -config "${GO2RTC_CONFIG}" >> /tmp/go2rtc.log 2>&1 &
-    GO2RTC_PID=$!
-    printf '%s\n' "${GO2RTC_PID}" > "${GO2RTC_PID_FILE}"
+    start_go2rtc_process
 
     (
         add_host_candidate() {
@@ -251,27 +320,43 @@ PY
 )
         for retry in $(seq 1 30); do
             candidate="http://127.0.0.1:${WB_APP_PORT}"
-            if curl -sf "${candidate}/api?api=${BRIDGE_API_TOKEN}" > /dev/null 2>&1; then
+            BRIDGE_API_PAYLOAD=$(curl -sf -H "api: ${BRIDGE_API_TOKEN}" "${candidate}/api" 2>/dev/null || true)
+            if BRIDGE_API_PAYLOAD="${BRIDGE_API_PAYLOAD}" python3 - <<'PY'
+import json
+import os
+import sys
+
+try:
+    payload = json.loads(os.environ.get("BRIDGE_API_PAYLOAD", ""))
+except ValueError:
+    sys.exit(1)
+cameras = payload.get("cameras") if isinstance(payload, dict) else None
+if isinstance(cameras, dict) and cameras:
+    sys.exit(0)
+sys.exit(1)
+PY
+            then
                 WB_APP_API_BASE="${candidate}"
-                echo "[GO2RTC] Bridge API ready after ${retry}x2s via ${WB_APP_API_BASE}" >&2
+                echo "[GO2RTC] Bridge catalog ready after ${retry}x2s via ${WB_APP_API_BASE}" >&2
                 break
             fi
             sleep 2
         done
         if [ -z "${WB_APP_API_BASE}" ]; then
-            echo "[GO2RTC] WARNING: authenticated bridge API did not become reachable on http://127.0.0.1:${WB_APP_PORT}; falling back to helper-only alias filtering" >&2
+            echo "[GO2RTC] WARNING: authenticated bridge catalog did not populate on http://127.0.0.1:${WB_APP_PORT}; keeping stale alias fallback and using helper-only alias filtering" >&2
         fi
         GO2RTC_CAM_JSON_FILE=/tmp/go2rtc_cam_sources.json
         printf '%s\n' "${CAM_JSON}" > "${GO2RTC_CAM_JSON_FILE}"
         GO2RTC_CONFIG="${GO2RTC_CONFIG}" GO2RTC_API_PORT="${GO2RTC_API_PORT}" GO2RTC_RTSP_PORT="${GO2RTC_RTSP_PORT}" GO2RTC_CAM_JSON_FILE="${GO2RTC_CAM_JSON_FILE}" WB_APP_API_BASE="${WB_APP_API_BASE}" WYZE_EMAIL="${WYZE_EMAIL}" API_ID="${API_ID}" API_KEY="${API_KEY}" WYZE_PASSWORD="${WYZE_PASSWORD}" python3 - <<'PY'
 import base64
+import hashlib
+import ipaddress
 import json
 import os
 import re
-import hashlib
+import urllib.error
 import urllib.parse
 import urllib.request
-import urllib.error
 from pathlib import Path
 
 
@@ -289,6 +374,77 @@ def with_subtype(url: str, subtype: str) -> str:
     filtered = [(key, value) for key, value in query if key != "subtype"]
     filtered.append(("subtype", subtype))
     return urllib.parse.urlunsplit(parsed._replace(query=urllib.parse.urlencode(filtered)))
+
+
+def normalize_mac(value: str) -> str:
+    return re.sub(r"[^0-9A-F]", "", str(value or "").upper())
+
+
+def lan_ip_overrides() -> dict[str, str]:
+    overrides = {}
+    raw = os.environ.get("GO2RTC_LAN_IP_OVERRIDES", "")
+    if not raw:
+        try:
+            with open("/data/options.json", encoding="utf-8") as fh:
+                options = json.load(fh)
+            raw = str(options.get("GO2RTC_LAN_IP_OVERRIDES") or "")
+        except (OSError, ValueError, TypeError):
+            raw = ""
+    for item in raw.split(","):
+        if "=" not in item:
+            continue
+        mac, host = item.split("=", 1)
+        mac = normalize_mac(mac)
+        host = host.strip()
+        if mac and host:
+            overrides[mac] = host
+    if overrides:
+        print(f"[GO2RTC] LAN IP overrides loaded for {len(overrides)} camera(s)", flush=True)
+    return overrides
+
+
+def camera_mac(cam: dict) -> str:
+    value = cam.get("mac") or cam.get("mac_address")
+    if value:
+        return normalize_mac(value)
+    parsed = urllib.parse.urlsplit(str(cam.get("url") or ""))
+    query = urllib.parse.parse_qs(parsed.query)
+    for key in ("mac", "mac_address"):
+        values = query.get(key) or []
+        if values:
+            return normalize_mac(values[0])
+    for part in str(cam.get("info") or "").split("|"):
+        candidate = normalize_mac(part)
+        if len(candidate) == 12:
+            return candidate
+    return ""
+
+
+def is_private_lan_host(host: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(str(host or "").strip())
+    except ValueError:
+        return False
+    return ip.is_private
+
+
+def force_lan_ip_overrides() -> bool:
+    return str(os.environ.get("GO2RTC_FORCE_LAN_IP_OVERRIDES", "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def with_lan_ip_override(url: str, cam: dict) -> str:
+    ip = lan_ip_overrides().get(camera_mac(cam))
+    if not ip:
+        return url
+    parsed = urllib.parse.urlsplit(url)
+    if is_private_lan_host(parsed.hostname or "") and not force_lan_ip_overrides():
+        print(
+            f"[GO2RTC] LAN override for {cam.get('name', '<unknown>')} is configured, "
+            f"but keeping helper LAN host {parsed.hostname}; set GO2RTC_FORCE_LAN_IP_OVERRIDES=true to force it",
+            flush=True,
+        )
+        return url
+    return urllib.parse.urlunsplit(parsed._replace(netloc=ip))
 
 
 def parse_model(info: str, url: str) -> str:
@@ -321,9 +477,12 @@ def bridge_api_token(email: str) -> str:
     return base64.urlsafe_b64encode(hashlib.sha256(email.encode()).digest()).decode()[:40]
 
 
-def fetch_json(url: str, timeout: float = 2.0):
+def fetch_json(url: str, timeout: float = 2.0, api_token: str = ""):
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as response:
+        request = urllib.request.Request(url)
+        if api_token:
+            request.add_header("api", api_token)
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.load(response)
     except (OSError, ValueError, urllib.error.HTTPError, urllib.error.URLError):
         return None
@@ -341,8 +500,8 @@ def bridge_camera_catalog() -> dict | None:
     if not base_url:
         return None
 
-    api_token = urllib.parse.quote(bridge_api_token(os.environ["WYZE_EMAIL"]), safe="")
-    payload = fetch_json(f"{base_url}/api?api={api_token}")
+    api_token = bridge_api_token(os.environ["WYZE_EMAIL"])
+    payload = fetch_json(f"{base_url}/api", api_token=api_token)
     if not isinstance(payload, dict):
         return None
     cameras = payload.get("cameras") if isinstance(payload, dict) else None
@@ -370,7 +529,7 @@ def bridge_camera_state(cam_uri: str) -> dict:
     if not base_url:
         return {}
 
-    api_token = urllib.parse.quote(bridge_api_token(os.environ["WYZE_EMAIL"]), safe="")
+    api_token = bridge_api_token(os.environ["WYZE_EMAIL"])
     cam_path = urllib.parse.quote(cam_uri, safe="")
     state = {}
 
@@ -393,15 +552,21 @@ def bridge_camera_state(cam_uri: str) -> dict:
             for uri, camera in enabled_entries
         )
 
-    config = fetch_json(f"{base_url}/api/{cam_path}/stream-config?api={api_token}")
+    config = fetch_json(f"{base_url}/api/{cam_path}/stream-config", api_token=api_token)
     feeds = config.get("feeds") if isinstance(config, dict) else None
+    if isinstance(config, dict) and config.get("native_preview_sd"):
+        state["sd"] = True
+        state["sd_supported"] = True
     if isinstance(feeds, dict):
+        sd_only = bool(config.get("sd_only")) if isinstance(config, dict) else False
         for feed_name in ("hd", "sd"):
             feed = feeds.get(feed_name)
             if not isinstance(feed, dict):
                 continue
             if "enabled" in feed:
-                if published is None or feed.get("path") == "native":
+                if sd_only:
+                    state[feed_name] = bool(feed.get("enabled"))
+                elif published is None or feed.get("path") == "native":
                     state[feed_name] = feed.get("enabled")
                 elif not state.get(feed_name, False):
                     state[feed_name] = False
@@ -480,7 +645,7 @@ for cam in cams:
 
     for alias, subtype in aliases:
         lines.append(f"  {alias}:")
-        lines.append(f"    - {with_subtype(url, subtype)}")
+        lines.append(f"    - {with_subtype(with_lan_ip_override(url, cam), subtype)}")
         print(f"[GO2RTC] Prepared stream: {alias} ({info}) subtype={subtype}", flush=True)
         added += 1
 
@@ -490,10 +655,10 @@ PY
         echo "[GO2RTC] Restarting sidecar with direct DTLS helper URLs" >&2
         kill "${GO2RTC_PID}" 2>/dev/null || true
         wait "${GO2RTC_PID}" 2>/dev/null || true
-        go2rtc -config "${GO2RTC_CONFIG}" >> /tmp/go2rtc.log 2>&1 &
-        GO2RTC_PID=$!
-        printf '%s\n' "${GO2RTC_PID}" > "${GO2RTC_PID_FILE}"
+        start_go2rtc_process
         sleep 5
+        preload_go2rtc_aliases
+        start_go2rtc_preload_refresh_loop
         curl -sf -X OPTIONS "${GO2RTC_API_BASE}/api/streams" 2>/dev/null | python3 -c "
 import json
 import sys

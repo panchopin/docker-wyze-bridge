@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -68,8 +69,13 @@ func TestOutputTracksRequireReadyMedia(t *testing.T) {
 	}
 
 	stream.videoReady.Store(true)
+	if got := len(stream.outputTracks()); got != 1 {
+		t.Fatalf("expected video-only output before real audio packets arrive, got %d", got)
+	}
+
+	stream.markAudioPacketSeen()
 	if got := len(stream.outputTracks()); got != 2 {
-		t.Fatalf("expected both output tracks once media is ready, got %d", got)
+		t.Fatalf("expected both output tracks once video and real audio packets are ready, got %d", got)
 	}
 	if !stream.canReuse() {
 		t.Fatal("expected stream with ready media to be reusable")
@@ -117,6 +123,176 @@ func TestCanReuseStaleNoMediaStreamExpires(t *testing.T) {
 	}
 }
 
+func TestRecoveredStreamKeepsReadyStatusDuringReconnectWindow(t *testing.T) {
+	videoTrack, err := webrtc.NewTrackLocalStaticRTP(
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264},
+		"video",
+		"pion",
+	)
+	if err != nil {
+		t.Fatalf("create video track: %v", err)
+	}
+	audioTrack, err := webrtc.NewTrackLocalStaticRTP(
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypePCMU, ClockRate: 8000, Channels: 2},
+		"audio",
+		"pion",
+	)
+	if err != nil {
+		t.Fatalf("create audio track: %v", err)
+	}
+	peerConnection, err := createPeerConnection(WebRTCConfig{})
+	if err != nil {
+		t.Fatalf("create peer connection: %v", err)
+	}
+	defer peerConnection.Close()
+
+	stream := &WebRTCStream{
+		streamID:          "deck-sub",
+		videoTrack:        videoTrack,
+		audioTrack:        audioTrack,
+		streamCreatedAt:   time.Now().Add(-10 * time.Minute),
+		recoveryStartedAt: time.Now(),
+	}
+	stream.videoReady.Store(true)
+	stream.audioReady.Store(true)
+	stream.audioPacketsSeen.Store(42)
+	stream.hasEverHadMedia.Store(true)
+	stream.reconnecting.Store(true)
+	stream.setUpstream(&UpstreamSession{peerConnection: peerConnection, startedAt: time.Now()})
+
+	status := stream.status()
+	if got := status["upstream_state"]; got != "recovering" {
+		t.Fatalf("expected reconnecting previously healthy stream to report recovering, got %v", got)
+	}
+	if got := status["video_ready"]; got != true {
+		t.Fatalf("expected video_ready to stay true during bounded recovery, got %v", got)
+	}
+	if got := status["audio_packets_seen"]; got != uint64(42) {
+		t.Fatalf("expected audio packet count to stay available during bounded recovery, got %v", got)
+	}
+	if !stream.canReuse() {
+		t.Fatal("expected stream inside recovery window to remain reusable")
+	}
+}
+
+func TestRecoveredStreamExpiresAfterRecoveryWindow(t *testing.T) {
+	stream := &WebRTCStream{
+		streamID:          "deck-sub",
+		streamCreatedAt:   time.Now().Add(-10 * time.Minute),
+		recoveryStartedAt: time.Now().Add(-maxRecoveryAge - time.Second),
+	}
+	stream.videoReady.Store(true)
+	stream.hasEverHadMedia.Store(true)
+
+	if stream.canReuse() {
+		t.Fatal("expected previously healthy stream past recovery window to become non-reusable")
+	}
+}
+
+func TestBufferVideoParameterSetReassemblesFragmentedSTAPA(t *testing.T) {
+	stream := &WebRTCStream{}
+
+	stapAWithoutHeader := []byte{
+		0x00, 0x02, 0x67, 0xaa,
+		0x00, 0x02, 0x68, 0xbb,
+	}
+	start := &rtp.Packet{
+		Header:  rtp.Header{SequenceNumber: 10},
+		Payload: append([]byte{0x7c, 0x98}, stapAWithoutHeader[:4]...),
+	}
+	end := &rtp.Packet{
+		Header:  rtp.Header{SequenceNumber: 11},
+		Payload: append([]byte{0x7c, 0x58}, stapAWithoutHeader[4:]...),
+	}
+
+	stream.bufferVideoParameterSet(start)
+	stream.bufferVideoParameterSet(end)
+
+	if stream.videoParamPacket == nil {
+		t.Fatal("expected fragmented STAP-A SPS/PPS to be buffered as a replay packet")
+	}
+	if stream.videoSPSBytes != 2 || stream.videoPPSBytes != 2 {
+		t.Fatalf("expected SPS/PPS sizes 2/2, got %d/%d", stream.videoSPSBytes, stream.videoPPSBytes)
+	}
+	if got := stream.videoParamPacket.Payload[0] & 0x1f; got != 24 {
+		t.Fatalf("expected reassembled STAP-A payload, got nalu type %d", got)
+	}
+}
+
+func TestReplayFailureThresholdForcesReconnect(t *testing.T) {
+	stream := &WebRTCStream{}
+	for i := int32(1); i < maxVideoParamReplayFailures; i++ {
+		if stream.recordVideoReplayFailure() {
+			t.Fatalf("failure %d should not cross reconnect threshold", i)
+		}
+	}
+	if !stream.recordVideoReplayFailure() {
+		t.Fatal("expected third consecutive replay failure to cross reconnect threshold")
+	}
+}
+
+func TestNoVideoReconnectAttemptsForceRecreate(t *testing.T) {
+	stream := &WebRTCStream{}
+	stream.reconnecting.Store(true)
+	for i := int32(0); i < maxNoVideoReconnectAttempts; i++ {
+		stream.markReconnectAttempt(1)
+	}
+	if stream.shouldForceRecreateNoVideo() {
+		t.Fatal("expected three no-video reconnect attempts to remain below force-recreate threshold")
+	}
+
+	stream.markReconnectAttempt(1)
+	if !stream.shouldForceRecreateNoVideo() {
+		t.Fatal("expected fourth no-video reconnect attempt to force recreate")
+	}
+
+	stream.videoReady.Store(true)
+	if stream.shouldForceRecreateNoVideo() {
+		t.Fatal("expected video-ready stream not to force recreate")
+	}
+}
+
+func TestReapStaleStreamsRecreatesNoVideoReconnectWedge(t *testing.T) {
+	streamsMu.Lock()
+	previousStreams := streams
+	streams = make(map[string]*WebRTCStream)
+	stream := &WebRTCStream{streamID: "south-yard-sub"}
+	stream.reconnecting.Store(true)
+	for i := int32(0); i < maxNoVideoReconnectAttempts+1; i++ {
+		stream.markReconnectAttempt(1)
+	}
+	streams[stream.streamID] = stream
+	streamsMu.Unlock()
+	defer func() {
+		streamsMu.Lock()
+		streams = previousStreams
+		streamsMu.Unlock()
+	}()
+
+	previousRecreate := recreateStreamFn
+	called := make(chan string, 1)
+	recreateStreamFn = func(streamID string, current *WebRTCStream, reason string) error {
+		if current != stream {
+			t.Fatalf("expected current stream pointer to be passed to recreate")
+		}
+		called <- streamID + ":" + reason
+		return nil
+	}
+	defer func() { recreateStreamFn = previousRecreate }()
+
+	if got := reapStaleStreams(); got != 1 {
+		t.Fatalf("expected one stale stream candidate, got %d", got)
+	}
+	select {
+	case msg := <-called:
+		if !strings.Contains(msg, "south-yard-sub:no video after 4 reconnect attempts") {
+			t.Fatalf("unexpected recreate call: %s", msg)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected stale stream recreate to be called")
+	}
+}
+
 func TestClassifyWSReadErrorTreatsGoingAwayAsNormal(t *testing.T) {
 	closeInfo := classifyWSReadError(&websocket.CloseError{Code: websocket.CloseGoingAway, Text: "Going away"})
 	if !closeInfo.normal {
@@ -147,10 +323,10 @@ func TestShouldReconnectOnNormalWSClosure(t *testing.T) {
 			want:       false,
 		},
 		{
-			name:       "ready audio stays alive",
+			name:       "audio-only peer reconnects",
 			state:      webrtc.PeerConnectionStateConnecting,
 			audioReady: true,
-			want:       false,
+			want:       true,
 		},
 		{
 			name:  "new peer reconnects",
@@ -195,6 +371,29 @@ func TestIsTerminalRefreshErrorIgnoresRetryableRefreshFailures(t *testing.T) {
 	}
 	if isTerminalRefreshError(errors.New("boom")) {
 		t.Fatal("expected unrelated error to stay non-terminal")
+	}
+}
+
+func TestKVSConfigURLUsesExplicitPort(t *testing.T) {
+	t.Setenv("KVS_CONFIG_HOST", "bridge.local")
+	t.Setenv("KVS_CONFIG_PORT", "55000")
+	t.Setenv("WB_APP_PORT", "5000")
+
+	got := kvsConfigURL("south-yard-sub")
+	want := "http://bridge.local:55000/kvs-config/south-yard-sub"
+	if got != want {
+		t.Fatalf("expected %q, got %q", want, got)
+	}
+}
+
+func TestKVSConfigURLFallsBackToBridgeAppPort(t *testing.T) {
+	t.Setenv("KVS_CONFIG_PORT", "")
+	t.Setenv("WB_APP_PORT", "55000")
+
+	got := kvsConfigURL("garage-sub")
+	want := "http://127.0.0.1:55000/kvs-config/garage-sub"
+	if got != want {
+		t.Fatalf("expected %q, got %q", want, got)
 	}
 }
 

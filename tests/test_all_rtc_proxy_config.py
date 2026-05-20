@@ -10,6 +10,7 @@ sys.path.insert(
 )
 
 from wyzecam.api_models import WyzeCamera
+import wyzebridge.wyze_api as wyze_api_module
 from wyzebridge.wyze_api import WyzeApi
 
 
@@ -50,7 +51,8 @@ class TestAllRTCProxyConfig(unittest.TestCase):
 
         with (
             patch.object(WyzeApi, "get_camera", return_value=cam),
-            patch("wyzebridge.wyze_api.get_cam_webrtc", return_value=signal),
+            patch.object(WyzeApi, "_maybe_wake_kvs_camera"),
+            patch.object(wyze_api_module, "get_cam_webrtc", return_value=signal),
         ):
             config = self.api.get_kvs_proxy_config(cam.name_uri)
 

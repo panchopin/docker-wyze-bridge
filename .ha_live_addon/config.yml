@@ -2,7 +2,7 @@ name: Docker Wyze Bridge (Dev Build)
 description: Local staging build of Docker Wyze Bridge for SSH-driven validation before production promotion.
 slug: docker_wyze_bridge_dev
 url: https://github.com/thatdaveguy1/docker-wyze-bridge
-version: 4.3.1-dev
+version: 4.3.2-dev
 stage: stable
 arch:
   - armv7
@@ -45,6 +45,7 @@ options:
   API_KEY: ""
   ENABLE_AUDIO: true
   ON_DEMAND: true
+  SD_ONLY: false
   MOTION_API: true
   CAM_OPTIONS: []
   CONNECT_TIMEOUT: 60
@@ -57,9 +58,8 @@ schema:
   API_KEY: match([a-zA-Z0-9]{60})
   TOTP_KEY: str?
   ON_DEMAND: bool?
+  SD_ONLY: bool?
   ENABLE_AUDIO: bool?
-  QUALITY: str?
-  SUB_QUALITY: str?
   SUBSTREAM: bool?
   NET_MODE: list(LAN|P2P|ANY)?
   FORCE_FPS: int?
@@ -67,12 +67,8 @@ schema:
     - CAM_NAME: str?
       HD: bool?
       SD: bool?
-      HD_KBPS: int?
-      SD_KBPS: int?
       AUDIO: bool?
       STREAM: list(main|both|sub)?
-      QUALITY: str?
-      SUB_QUALITY: str?
       FORCE_FPS: int?
       RECORD: bool?
       SUB_RECORD: bool?

@@ -141,6 +141,15 @@ class TestFrontendStaticAssets(unittest.TestCase):
             html,
         )
 
+    def test_site_js_hides_hd_controls_in_sd_only_mode(self):
+        site_js = pathlib.Path(__file__).resolve().parent.parent / "app" / "static" / "site.js"
+        script = site_js.read_text(encoding="utf-8")
+
+        self.assertIn("config.sd_only", script)
+        self.assertIn('feed === "hd"', script)
+        self.assertIn("button.hidden = hideFeed", script)
+        self.assertIn('input.closest(".control")', script)
+
     def test_static_site_css_is_served(self):
         client = self.create_client()
 

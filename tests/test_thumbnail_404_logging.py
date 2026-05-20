@@ -17,6 +17,7 @@ except ImportError:
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "app"))
 
+import wyzebridge.wyze_api as wyze_api_module
 from wyzebridge.wyze_api import WyzeApi
 
 
@@ -41,9 +42,9 @@ class TestThumbnail404Logging(unittest.TestCase):
                 "get_thumbnail",
                 return_value="https://example.test/thumb.jpg?X-Amz-Date=1",
             ),
-            patch("wyzebridge.wyze_api.get", side_effect=error),
-            patch("wyzebridge.wyze_api.logger.warning") as warning,
-            patch("wyzebridge.wyze_api.logger.error") as err,
+            patch.object(wyze_api_module, "get", side_effect=error),
+            patch.object(wyze_api_module.logger, "warning") as warning,
+            patch.object(wyze_api_module.logger, "error") as err,
         ):
             result = api.save_thumbnail("hamster", "")
 
@@ -68,10 +69,9 @@ class TestThumbnail404Logging(unittest.TestCase):
 
             with (
                 patch.object(WyzeApi, "get_thumbnail", return_value="https://example.test/thumb.jpg"),
-                patch("wyzebridge.wyze_api.IMG_PATH", temp_dir + "/"),
-                patch("wyzebridge.wyze_api.url_timestamp", return_value=0),
-                patch("wyzebridge.wyze_api.getmtime", return_value=0),
-                patch("wyzebridge.wyze_api.get", return_value=response),
+                patch.object(wyze_api_module, "IMG_PATH", temp_dir + "/"),
+                patch.object(wyze_api_module, "url_timestamp", return_value=0),
+                patch.object(wyze_api_module, "get", return_value=response),
             ):
                 result = api.save_thumbnail("hamster", "")
 
@@ -90,10 +90,9 @@ class TestThumbnail404Logging(unittest.TestCase):
 
             with (
                 patch.object(WyzeApi, "get_thumbnail", return_value="https://example.test/thumb.jpg"),
-                patch("wyzebridge.wyze_api.IMG_PATH", temp_dir + "/"),
-                patch("wyzebridge.wyze_api.url_timestamp", return_value=0),
-                patch("wyzebridge.wyze_api.getmtime", return_value=0),
-                patch("wyzebridge.wyze_api.get", return_value=response),
+                patch.object(wyze_api_module, "IMG_PATH", temp_dir + "/"),
+                patch.object(wyze_api_module, "url_timestamp", return_value=0),
+                patch.object(wyze_api_module, "get", return_value=response),
             ):
                 result = api.save_thumbnail("garage", "")
 
@@ -112,9 +111,9 @@ class TestThumbnail404Logging(unittest.TestCase):
 
             with (
                 patch.object(WyzeApi, "get_thumbnail", return_value="https://example.test/thumb.jpg"),
-                patch("wyzebridge.wyze_api.IMG_PATH", temp_dir + "/"),
-                patch("wyzebridge.wyze_api.url_timestamp", return_value=0),
-                patch("wyzebridge.wyze_api.get", return_value=response),
+                patch.object(wyze_api_module, "IMG_PATH", temp_dir + "/"),
+                patch.object(wyze_api_module, "url_timestamp", return_value=0),
+                patch.object(wyze_api_module, "get", return_value=response),
             ):
                 result = api.save_thumbnail("hamster", "")
 
@@ -131,10 +130,10 @@ class TestThumbnail404Logging(unittest.TestCase):
 
             with (
                 patch.object(WyzeApi, "get_thumbnail", return_value="https://example.test/thumb_1000.jpg"),
-                patch("wyzebridge.wyze_api.IMG_PATH", temp_dir + "/"),
-                patch("wyzebridge.wyze_api.url_timestamp", return_value=1000),
-                patch("wyzebridge.wyze_api.time", return_value=1400),
-                patch("wyzebridge.wyze_api.get") as get,
+                patch.object(wyze_api_module, "IMG_PATH", temp_dir + "/"),
+                patch.object(wyze_api_module, "url_timestamp", return_value=1000),
+                patch.object(wyze_api_module, "time", return_value=1400),
+                patch.object(wyze_api_module, "get") as get,
             ):
                 result = api.save_thumbnail("garage", "")
 
@@ -145,6 +144,8 @@ class TestThumbnail404Logging(unittest.TestCase):
     def test_unchanged_cached_thumbnail_is_not_a_fresh_refresh(self):
         api = WyzeApi()
         valid_image = valid_jpeg_bytes((90, 50, 140))
+        response = Mock(headers={"Content-Type": "image/jpeg"}, content=valid_image)
+        response.raise_for_status = Mock()
 
         with tempfile.TemporaryDirectory() as temp_dir:
             save_path = pathlib.Path(temp_dir) / "hamster.jpg"
@@ -152,20 +153,22 @@ class TestThumbnail404Logging(unittest.TestCase):
 
             with (
                 patch.object(WyzeApi, "get_thumbnail", return_value="https://example.test/thumb_1000.jpg"),
-                patch("wyzebridge.wyze_api.IMG_PATH", temp_dir + "/"),
-                patch("wyzebridge.wyze_api.url_timestamp", return_value=1000),
-                patch("wyzebridge.wyze_api.getmtime", return_value=1000),
-                patch("wyzebridge.wyze_api.get") as get,
+                patch.object(wyze_api_module, "IMG_PATH", temp_dir + "/"),
+                patch.object(wyze_api_module, "url_timestamp", return_value=1000),
+                patch.object(wyze_api_module, "time", return_value=1200),
+                patch.object(wyze_api_module, "get", return_value=response) as get,
             ):
                 result = api.save_thumbnail("hamster", "")
 
             self.assertFalse(result)
-            get.assert_not_called()
+            get.assert_called_once()
             self.assertEqual(save_path.read_bytes(), valid_image)
 
-    def test_recent_unchanged_cached_thumbnail_is_allowed(self):
+    def test_recent_unchanged_cached_thumbnail_is_not_a_fresh_refresh(self):
         api = WyzeApi()
         valid_image = valid_jpeg_bytes((140, 60, 90))
+        response = Mock(headers={"Content-Type": "image/jpeg"}, content=valid_image)
+        response.raise_for_status = Mock()
 
         with tempfile.TemporaryDirectory() as temp_dir:
             save_path = pathlib.Path(temp_dir) / "hamster.jpg"
@@ -173,16 +176,15 @@ class TestThumbnail404Logging(unittest.TestCase):
 
             with (
                 patch.object(WyzeApi, "get_thumbnail", return_value="https://example.test/thumb_1000.jpg"),
-                patch("wyzebridge.wyze_api.IMG_PATH", temp_dir + "/"),
-                patch("wyzebridge.wyze_api.url_timestamp", return_value=1000),
-                patch("wyzebridge.wyze_api.getmtime", return_value=1000),
-                patch("wyzebridge.wyze_api.time", return_value=1200),
-                patch("wyzebridge.wyze_api.get") as get,
+                patch.object(wyze_api_module, "IMG_PATH", temp_dir + "/"),
+                patch.object(wyze_api_module, "url_timestamp", return_value=1000),
+                patch.object(wyze_api_module, "time", return_value=1200),
+                patch.object(wyze_api_module, "get", return_value=response) as get,
             ):
                 result = api.save_thumbnail("hamster", "")
 
-            self.assertTrue(result)
-            get.assert_not_called()
+            self.assertFalse(result)
+            get.assert_called_once()
             self.assertEqual(save_path.read_bytes(), valid_image)
 
 

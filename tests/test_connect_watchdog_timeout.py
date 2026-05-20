@@ -9,6 +9,12 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "app"))
 
+if not hasattr(sys.modules.get("wyzebridge.wyze_stream"), "StreamStatus"):
+    for module_name in list(sys.modules):
+        if module_name == "wyzebridge" or module_name.startswith("wyzebridge."):
+            del sys.modules[module_name]
+
+import wyzebridge.wyze_stream as wyze_stream_module
 from wyzebridge.wyze_stream import StreamStatus, WyzeStream
 
 
@@ -28,7 +34,7 @@ class TestConnectWatchdogTimeout(unittest.TestCase):
         stream.stopped = False
         stream._state = c_int(StreamStatus.CONNECTING)
 
-        with patch("wyzebridge.wyze_stream.time", return_value=126.0):
+        with patch.object(wyze_stream_module, "time", return_value=126.0):
             state = WyzeStream.health_check(stream, should_start=False)
 
         self.assertEqual(state, StreamStatus.CONNECTING)
