@@ -1,0 +1,23 @@
+# Keep local validation and operator artifacts out of public release archives.
+AGENTS.md export-ignore
+lessons.md export-ignore
+tmp/ export-ignore
+data/ export-ignore
+node_modules/ export-ignore
+package.json export-ignore
+ha_camera_watchdog_update.py export-ignore
+scripts/.ha_ssh.env export-ignore
+tasks/ export-ignore
+scripts/ha_* export-ignore
+scripts/deploy_ha_local_addon.sh export-ignore
+scripts/master_goal_status.py export-ignore
+scripts/run_master_local_gates.sh export-ignore
+tests/test_ha_* export-ignore
+tests/ export-ignore
+whep_proxy/*_test.go export-ignore
+home_assistant/whep_proxy/*_test.go export-ignore
+README.md export-ignore
+docs/ export-ignore
+home_assistant/CHANGELOG.md export-ignore
+runtime_overlays/*/CHANGELOG.md export-ignore
+.ha_live_addon/ export-ignore
