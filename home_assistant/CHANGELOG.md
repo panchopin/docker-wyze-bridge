@@ -1,5 +1,15 @@
 # What's Changed
 
+## What's Changed in v4.3.4
+
+Patch release focused on WHEP reconnect crash resistance.
+
+### Major Changes
+
+- Treat a missing upstream peer connection during WHEP reconnect as a recoverable stream error instead of panicking the proxy process.
+- Add regression coverage for the missing-peer path observed during live validation.
+- Tune out-of-box model defaults for current validated cameras: keep V3 bridge behavior unchanged, keep V4 on the stable KVS-first probe mode by default, and route Bulb Cam SD feeds to the bridge `sub` path unless users explicitly pin `main`.
+
 ## What's Changed in v4.3.3
 
 Patch release focused on SD-only native `go2rtc` alias reliability.

@@ -37,8 +37,9 @@ _VALIDATED_NATIVE_MODELS = {
         "sub_selected": True,
     },
     "HL_BC": {
-        "reason": "HL_BC stays bridge-first because native go2rtc still validated at 640x360",
+        "reason": "HL_BC native go2rtc SD remains diagnostic-only until it produces non-empty frames on this host",
         "selected": False,
+        "sub_selected": False,
     },
 }
 
@@ -119,9 +120,10 @@ def native_stream_info(camera, substream: bool = False) -> dict[str, Any]:
     selected_flag = (
         model_support.get("sub_selected") if substream else model_support.get("selected")
     ) if model_support else False
-    # selected is gated only on api_reachable, not alias readiness — alias readiness is a
-    # transient startup condition and must not cause native cameras to lose their RTSP URL
-    selected = bool(supported and selected_flag and api_reachable)
+    # selected is determined by model validation alone — api_reachable is a transient startup
+    # condition and must not cause native cameras to lose their RTSP URL or prevent the
+    # go2rtc sidecar from creating aliases during its config-generation phase
+    selected = bool(supported and selected_flag)
     # alias_ready is a diagnostic-only field: it tells callers whether the stream is already
     # hot in go2rtc, but a False value does NOT block selection or URL assignment
     alias_ready = bool(selected and _native_alias_is_ready(alias))

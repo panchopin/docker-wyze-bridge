@@ -95,6 +95,38 @@ func TestOutputTracksRequireReadyMedia(t *testing.T) {
 	}
 }
 
+func TestCreateAndSendOfferRejectsMissingPeerConnection(t *testing.T) {
+	if err := createAndSendOffer("south-yard", nil); err == nil {
+		t.Fatal("expected nil session to fail")
+	}
+	if err := createAndSendOffer("south-yard", &UpstreamSession{}); err == nil {
+		t.Fatal("expected nil peer connection to fail")
+	} else if !strings.Contains(err.Error(), "peer connection unavailable") {
+		t.Fatalf("expected peer connection error, got %v", err)
+	}
+}
+
+func TestUpstreamVideoOnlyMatchesConfiguredStreams(t *testing.T) {
+	t.Setenv("WHEP_UPSTREAM_VIDEO_ONLY_STREAMS", "south-yard, south-yard-sub\thamster")
+
+	for _, streamID := range []string{"south-yard", "south-yard-sub", "hamster"} {
+		if !upstreamVideoOnly(streamID) {
+			t.Fatalf("expected %s to be video-only", streamID)
+		}
+	}
+	if upstreamVideoOnly("deck-sub") {
+		t.Fatal("did not expect deck-sub to be video-only")
+	}
+}
+
+func TestUpstreamVideoOnlySupportsWildcard(t *testing.T) {
+	t.Setenv("WHEP_UPSTREAM_VIDEO_ONLY_STREAMS", "*")
+
+	if !upstreamVideoOnly("deck-sub") {
+		t.Fatal("expected wildcard to match any stream")
+	}
+}
+
 func TestCanReuseStaleNoMediaStreamExpires(t *testing.T) {
 	// A stream that has never produced media and whose streamCreatedAt is past
 	// maxNoMediaAge must return canReuse()=false — even when reconnecting=true

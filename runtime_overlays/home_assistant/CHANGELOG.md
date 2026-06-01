@@ -1,5 +1,14 @@
 # What's Changed
 
+## What's Changed in v4.3.4
+
+Patch release focused on WHEP reconnect crash resistance.
+
+### Major Changes
+
+- Treat a missing upstream peer connection during WHEP reconnect as a recoverable stream error instead of panicking the proxy process.
+- Add regression coverage for the missing-peer path observed during live validation.
+
 ## What's Changed in v4.3.3
 
 Patch release focused on SD-only native `go2rtc` alias reliability.

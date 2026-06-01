@@ -488,7 +488,7 @@ class WyzeApi:
         if cam.product_model == "HL_BC" and not substream:
             quality = env_cam("sub_quality", stream_name, "sd30")
         self._maybe_wake_kvs_camera(cam)
-        if cam.product_model in {"LD_CFP", "HL_CAM4"}:
+        if cam.product_model in {"LD_CFP", "HL_CAM4", "HL_BC"}:
             if not get_camera_stream:
                 raise ValueError("KVS stream API unavailable in this branch")
             kvs_stream = get_camera_stream(self.auth, cam)

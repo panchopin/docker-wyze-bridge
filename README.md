@@ -15,6 +15,12 @@ Create local WebRTC, RTSP, RTMP, and HLS streams for Wyze cameras without custom
 - WebRTC/KVS-backed bridge path for modern Wyze models.
 - Native Home Assistant `go2rtc` RTSP sidecar on `:19554` for supported 4.3 workflows.
 
+## 4.3.4 Highlights
+
+- WHEP reconnects now reject missing upstream peer connections as recoverable stream errors instead of panicking the proxy process during camera reconnect storms.
+- Default camera behavior is now tuned for the validated 4.3 models: V3 keeps the established bridge path defaults, V4 defaults stay on stable KVS-first probing, and Bulb Cam SD feeds default to the bridge `sub` route unless explicitly overridden.
+- This is a narrow reliability patch for the `4.3` line; the broader Home Assistant startup, snapshot, SD-only, WHEP, and packaging hygiene changes remain from `4.3.2`.
+
 ## 4.3.3 Highlights
 
 - SD-only native `go2rtc` streams now stay selected when the quick per-stream readiness probe times out but the full `go2rtc` stream table still proves the alias is alive. This prevents a working `*-sd` feed from falling back to a dead main/KVS path under load.

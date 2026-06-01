@@ -85,40 +85,31 @@ class TestKVSSubstreamProxyConfig(unittest.TestCase):
 
     def test_hl_bc_main_path_proxy_config_uses_sd_quality(self):
         camera = make_camera("HL_BC", "South Yard")
-        signal = {
-            "signalingUrl": "wss://signal.example/ws?camera=south-yard",
-            "signalToken": "token-abc",
-            "ClientId": "phone-abc",
-            "servers": [],
-        }
 
         with (
             patch.object(WyzeApi, "get_camera", return_value=camera) as get_camera,
             patch.object(WyzeApi, "_maybe_wake_kvs_camera"),
-            patch.object(wyze_api_module, "get_cam_webrtc", return_value=signal),
+            patch.object(wyze_api_module, "get_camera_stream", return_value=FakeStream()) as get_camera_stream,
+            patch.object(wyze_api_module, "get_cam_webrtc") as get_cam_webrtc,
         ):
             config = self.api.get_kvs_proxy_config("south-yard")
 
         get_camera.assert_called_with("south-yard", True)
+        get_camera_stream.assert_called_once_with(self.api.auth, camera)
+        get_cam_webrtc.assert_not_called()
         self.assertEqual(config["camera_name"], "south-yard")
         self.assertEqual(config["stream_id"], "south-yard")
         self.assertEqual(config["quality"], "sd30")
         self.assertFalse(config["substream"])
-        self.assertEqual(config["phone_id"], "phone-abc")
+        self.assertEqual(config["phone_id"], "phone-123")
 
     def test_hl_bc_main_path_wakes_camera_before_proxy_config(self):
         camera = make_camera("HL_BC", "South Yard")
-        signal = {
-            "signalingUrl": "wss://signal.example/ws?camera=south-yard",
-            "signalToken": "token-abc",
-            "ClientId": "phone-abc",
-            "servers": [],
-        }
 
         with (
             patch.object(WyzeApi, "get_camera", return_value=camera),
             patch.object(wyze_api_module, "wakeup_kvs_camera") as wakeup,
-            patch.object(wyze_api_module, "get_cam_webrtc", return_value=signal),
+            patch.object(wyze_api_module, "get_camera_stream", return_value=FakeStream()),
         ):
             config = self.api.get_kvs_proxy_config("south-yard")
 

@@ -83,6 +83,8 @@ type UpstreamSession struct {
 	wsMu              sync.Mutex
 	pendingCandidates []webrtc.ICECandidateInit
 	remoteDescription *webrtc.SessionDescription
+	answerReceived    chan struct{}
+	answerOnce        sync.Once
 	correlationID     string
 	recipientClientID string
 	startedAt         time.Time
@@ -133,6 +135,30 @@ const maxRecoveryAge = 90 * time.Second
 const maxNoVideoReconnectAttempts int32 = 3
 const maxVideoParamReplayFailures int32 = 3
 const streamHealthCheckInterval = 30 * time.Second
+const upstreamAnswerTimeout = 90 * time.Second
+
+func envListMatches(name, value string) bool {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return false
+	}
+	if strings.EqualFold(raw, "all") || raw == "*" {
+		return true
+	}
+	wanted := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\n' || r == '\t'
+	})
+	for _, item := range wanted {
+		if strings.EqualFold(strings.TrimSpace(item), value) {
+			return true
+		}
+	}
+	return false
+}
+
+func upstreamVideoOnly(streamID string) bool {
+	return envListMatches("WHEP_UPSTREAM_VIDEO_ONLY_STREAMS", streamID)
+}
 
 func (stream *WebRTCStream) outputTracks() []*webrtc.TrackLocalStaticRTP {
 	stream.mediaMu.RLock()
@@ -1416,6 +1442,7 @@ func handleRemoteAnswer(streamID string, session *UpstreamSession, msg map[strin
 		return fmt.Errorf("set remote description: %w", err)
 	}
 	session.remoteDescription = &answer
+	markAnswerReceived(session)
 
 	for _, candidate := range session.pendingCandidates {
 		if err := session.peerConnection.AddICECandidate(candidate); err != nil {
@@ -1424,6 +1451,38 @@ func handleRemoteAnswer(streamID string, session *UpstreamSession, msg map[strin
 	}
 	session.pendingCandidates = nil
 	return nil
+}
+
+func markAnswerReceived(session *UpstreamSession) {
+	if session == nil || session.answerReceived == nil {
+		return
+	}
+	session.answerOnce.Do(func() { close(session.answerReceived) })
+}
+
+func watchUpstreamAnswer(stream *WebRTCStream, session *UpstreamSession, timeout time.Duration) {
+	if stream == nil || session == nil || session.answerReceived == nil || timeout <= 0 {
+		return
+	}
+	go func() {
+		select {
+		case <-session.answerReceived:
+			return
+		case <-time.After(timeout):
+		}
+
+		if stream.currentUpstream() != session || stream.destroyed.Load() {
+			return
+		}
+		if session.remoteDescription != nil {
+			return
+		}
+
+		reason := fmt.Sprintf("upstream SDP answer timeout after %s", timeout)
+		log.Printf("[WHEP_PROXY] %s for %s", reason, stream.streamID)
+		traceLogf(stream.streamID, "%s", reason)
+		stream.handleUpstreamDisconnect(session, reason)
+	}()
 }
 
 func handleRemoteCandidate(streamID string, session *UpstreamSession, msg map[string]interface{}) error {
@@ -1462,6 +1521,9 @@ func handleRemoteCandidate(streamID string, session *UpstreamSession, msg map[st
 }
 
 func createAndSendOffer(streamID string, session *UpstreamSession) error {
+	if session == nil || session.peerConnection == nil {
+		return fmt.Errorf("upstream peer connection unavailable")
+	}
 	offer, err := session.peerConnection.CreateOffer(nil)
 	if err != nil {
 		return fmt.Errorf("create offer: %w", err)
@@ -1548,6 +1610,7 @@ func establishUpstream(stream *WebRTCStream) error {
 	session := &UpstreamSession{
 		peerConnection:    peerConnection,
 		wsConn:            conn,
+		answerReceived:    make(chan struct{}),
 		correlationID:     generateCorrelationID(config.PhoneID),
 		recipientClientID: config.PhoneID,
 		startedAt:         time.Now(),
@@ -1563,12 +1626,16 @@ func establishUpstream(stream *WebRTCStream) error {
 		return err
 	}
 
-	if _, err = peerConnection.AddTransceiverFromKind(
-		webrtc.RTPCodecTypeAudio,
-		webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly},
-	); err != nil {
-		stream.handleUpstreamDisconnect(session, fmt.Sprintf("add audio transceiver: %v", err))
-		return err
+	if upstreamVideoOnly(stream.streamID) {
+		traceLogf(stream.streamID, "upstream audio transceiver disabled by WHEP_UPSTREAM_VIDEO_ONLY_STREAMS")
+	} else {
+		if _, err = peerConnection.AddTransceiverFromKind(
+			webrtc.RTPCodecTypeAudio,
+			webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly},
+		); err != nil {
+			stream.handleUpstreamDisconnect(session, fmt.Sprintf("add audio transceiver: %v", err))
+			return err
+		}
 	}
 
 	peerConnection.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
@@ -1802,6 +1869,7 @@ func establishUpstream(stream *WebRTCStream) error {
 		stream.handleUpstreamDisconnect(session, fmt.Sprintf("createAndSendOffer failed: %v", err))
 		return err
 	}
+	watchUpstreamAnswer(stream, session, upstreamAnswerTimeout)
 
 	return nil
 }

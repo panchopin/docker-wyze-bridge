@@ -1,6 +1,6 @@
 # Docker Wyze Bridge
 
-This Home Assistant add-on provides local WebRTC, RTSP, RTMP, and HLS access for Wyze cameras. The `4.3.3` release is a narrow reliability patch for SD-only native `go2rtc` aliases: if the quick per-alias readiness probe is slow but the full stream table proves the `*-sd` alias is alive, the bridge keeps the working SD feed selected instead of falling back to a dead main/KVS path. The broader Home Assistant startup, snapshot, SD-only, WHEP, and release-hygiene work remains from `4.3.2`.
+This Home Assistant add-on provides local WebRTC, RTSP, RTMP, and HLS access for Wyze cameras. The `4.3.4` release is a narrow reliability patch for WHEP reconnect crash resistance: missing upstream peer connections are now handled as recoverable stream errors instead of panicking the proxy process. The broader Home Assistant startup, snapshot, SD-only, WHEP, and release-hygiene work remains from `4.3.2`.
 
 ## Installation
 

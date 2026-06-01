@@ -2,7 +2,7 @@ name: Docker Wyze Bridge (Dev Build)
 description: Local staging build of Docker Wyze Bridge for SSH-driven validation before production promotion.
 slug: docker_wyze_bridge_dev
 url: https://github.com/thatdaveguy1/docker-wyze-bridge
-version: 4.3.3-dev
+version: 4.3.4-dev
 stage: stable
 arch:
   - armv7
@@ -51,6 +51,8 @@ options:
   CONNECT_TIMEOUT: 60
   CONNECT_RETRIES: 3
   CONNECT_RETRY_DELAY: 2.0
+  WHEP_DEBUG: false
+  WHEP_TRACE_STREAM: ""
 schema:
   WYZE_EMAIL: email
   WYZE_PASSWORD: password
@@ -117,6 +119,8 @@ schema:
   CONNECT_TIMEOUT: int?
   CONNECT_RETRIES: int?
   CONNECT_RETRY_DELAY: float?
+  WHEP_DEBUG: bool?
+  WHEP_TRACE_STREAM: str?
   IGNORE_OFFLINE: bool?
   OFFLINE_TIME: int?
   LOG_LEVEL: list(FATAL|ERROR|WARNING|INFO|DEBUG)?

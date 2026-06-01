@@ -211,6 +211,7 @@ class TestBridgeKVSStartupBehavior(unittest.TestCase):
                 {
                     "HD_NORTH_YARD": "False",
                     "SD_NORTH_YARD": "True",
+                    "STREAM_NORTH_YARD": "",
                     "GO2RTC_RTSP_PORT": "19554",
                 },
                 clear=False,
@@ -276,7 +277,7 @@ class TestBridgeKVSStartupBehavior(unittest.TestCase):
                     {"hd_enabled": True, "sd_enabled": True, "hd_kbps": 180, "sd_kbps": 30},
                 )
 
-    def test_camera_feed_config_keeps_hl_bc_sd_on_main_path(self):
+    def test_camera_feed_config_defaults_hl_bc_sd_to_sub_path(self):
         sys.modules.pop("wyze_bridge", None)
         reset_wyzecam_modules()
         with patch("os.makedirs"):
@@ -295,6 +296,39 @@ class TestBridgeKVSStartupBehavior(unittest.TestCase):
                 {
                     "HD_NORTH_YARD": "False",
                     "SD_NORTH_YARD": "True",
+                    "GO2RTC_RTSP_PORT": "19554",
+                },
+                clear=False,
+            ),
+        ):
+            bridge.streams = FakeStreams()
+            config = bridge.camera_feed_config(make_camera(model="HL_BC", nickname="South Yard"))
+
+        self.assertEqual(config["mode"], "sub")
+        self.assertFalse(config["feeds"]["hd"]["enabled"])
+        self.assertTrue(config["feeds"]["sd"]["enabled"])
+        self.assertEqual(config["feeds"]["sd"]["path"], "sub")
+
+    def test_camera_feed_config_allows_explicit_hl_bc_main_path(self):
+        sys.modules.pop("wyze_bridge", None)
+        reset_wyzecam_modules()
+        with patch("os.makedirs"):
+            WyzeBridge = importlib.import_module("wyze_bridge").WyzeBridge
+
+        bridge = WyzeBridge.__new__(WyzeBridge)
+        bridge.camera_feed_resolution = (
+            lambda camera, feed: "2560x1440" if feed == "hd" else "640x360"
+        )
+
+        with (
+            patch("wyze_bridge.get_camera_setting", side_effect=lambda _cam, _key, default="": default),
+            patch("wyze_bridge.native_stream_info", side_effect=fake_native_stream_info),
+            patch.dict(
+                "os.environ",
+                {
+                    "HD_NORTH_YARD": "False",
+                    "SD_NORTH_YARD": "True",
+                    "STREAM_NORTH_YARD": "main",
                     "GO2RTC_RTSP_PORT": "19554",
                 },
                 clear=False,

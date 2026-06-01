@@ -2,7 +2,7 @@ name: Docker Wyze Bridge
 description: WebRTC/RTSP/RTMP/LL-HLS bridge for Wyze cameras with Home Assistant support and a native go2rtc sidecar.
 slug: docker_wyze_bridge_v4
 url: https://github.com/thatdaveguy1/docker-wyze-bridge
-version: 4.3.3
+version: 4.3.4
 stage: stable
 arch:
   - armv7
@@ -53,6 +53,8 @@ options:
   CONNECT_TIMEOUT: 60
   CONNECT_RETRIES: 3
   CONNECT_RETRY_DELAY: 2.0
+  WHEP_DEBUG: false
+  WHEP_TRACE_STREAM: ""
 schema:
   WYZE_EMAIL: email
   WYZE_PASSWORD: password
@@ -121,6 +123,8 @@ schema:
   CONNECT_TIMEOUT: int?
   CONNECT_RETRIES: int?
   CONNECT_RETRY_DELAY: float?
+  WHEP_DEBUG: bool?
+  WHEP_TRACE_STREAM: str?
   IGNORE_OFFLINE: bool?
   OFFLINE_TIME: int?
   LOG_LEVEL: list(FATAL|ERROR|WARNING|INFO|DEBUG)?

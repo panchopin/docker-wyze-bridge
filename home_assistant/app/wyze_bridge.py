@@ -351,7 +351,9 @@ class WyzeBridge(Thread):
             elif sd_only and cam.is_kvs and native_sd.get("native_selected"):
                 sd_path = "main"
             elif cam.product_model == "HL_BC":
-                sd_path = "main"
+                # Bulb Cam is SD-only in practice; default to the bridge sub path unless
+                # the user explicitly pins main/both.
+                sd_path = "main" if legacy_mode in {"main", "both"} else "sub"
             else:
                 sd_path = "sub" if cam.bridge_can_substream else "main"
 

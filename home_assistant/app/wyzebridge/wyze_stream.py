@@ -136,7 +136,11 @@ class WyzeStream(Stream):
             )
             self.state = StreamStatus.DISABLED
 
-        if self.options.substream and not self.camera.bridge_can_substream:
+        if (
+            self.options.substream
+            and not self.camera.bridge_can_substream
+            and self.camera.product_model != "HL_BC"
+        ):
             logger.error(f"❗ {self.camera.nickname} may not support multiple streams!")
             self.state = StreamStatus.DISABLED
         elif self.uses_tutk_source:

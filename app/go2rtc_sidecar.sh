@@ -632,6 +632,8 @@ for cam in cams:
         hd_supported = False
     if sd_supported is None and model == "HL_BC":
         sd_supported = True
+    if model == "HL_BC" and sd_enabled is False and sd_supported:
+        sd_enabled = None
 
     aliases = []
     if hd_enabled is not False and hd_supported is not False:
