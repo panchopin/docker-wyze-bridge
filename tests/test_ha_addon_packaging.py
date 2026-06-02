@@ -372,6 +372,8 @@ class TestHomeAssistantAddonPackaging(unittest.TestCase):
             'bridge_catalog_empty = isinstance(catalog, dict) and not catalog',
             'if bridge_catalog_empty:',
             'published = None',
+            'if not feed.get("enabled"):',
+            'state[feed_name] = False',
             'if published is None or feed.get("path") == "native":',
             'if "enabled" not in state:',
             'state["enabled"] = bool(state.get("hd") or state.get("sd"))',

@@ -391,16 +391,28 @@ class StreamManager:
             if alternate_alias not in aliases:
                 aliases.append(alternate_alias)
         for candidate_alias in aliases:
-            if candidate_alias not in self.native_preloads:
-                preload = preload_native_stream(candidate_alias)
-                if preload.get("ok"):
-                    self.native_preloads.add(candidate_alias)
-            if write_native_snapshot(
-                candidate_alias,
-                cam_name,
-                warn_on_failure=require_selected and candidate_alias == alias,
-            ):
-                return True
+            warn_on_failure = require_selected and candidate_alias == alias
+            for attempt in range(2):
+                if attempt == 0:
+                    should_preload = candidate_alias not in self.native_preloads
+                else:
+                    should_preload = True
+                    self.native_preloads.discard(candidate_alias)
+                    logger.info(
+                        f"♻️ [{cam_name}] Re-preloading stale native alias {candidate_alias}"
+                    )
+
+                if should_preload:
+                    preload = preload_native_stream(candidate_alias)
+                    if preload.get("ok"):
+                        self.native_preloads.add(candidate_alias)
+
+                if write_native_snapshot(
+                    candidate_alias,
+                    cam_name,
+                    warn_on_failure=warn_on_failure,
+                ):
+                    return True
         return False
 
     def get_snapshot(self, cam_name: str) -> dict:

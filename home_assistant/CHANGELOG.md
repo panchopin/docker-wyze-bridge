@@ -1,5 +1,15 @@
 # What's Changed
 
+## What's Changed in v4.3.5
+
+Patch release focused on native SD alias durability for Home Assistant.
+
+### Major Changes
+
+- Honor explicit per-feed bridge config when the go2rtc sidecar builds native aliases, so a camera with `HD=false` and `SD=true` no longer seeds a competing fake HD alias alongside the real `-sd` alias.
+- Re-preload a stale selected native alias once before giving up on a native snapshot, which helps the bridge recover when go2rtc producer metadata is present but the still-frame path has gone stale.
+- Add focused regression coverage for both the SD-only alias builder behavior and the stale native snapshot retry path.
+
 ## What's Changed in v4.3.4
 
 Patch release focused on WHEP reconnect crash resistance.
@@ -8,7 +18,6 @@ Patch release focused on WHEP reconnect crash resistance.
 
 - Treat a missing upstream peer connection during WHEP reconnect as a recoverable stream error instead of panicking the proxy process.
 - Add regression coverage for the missing-peer path observed during live validation.
-- Tune out-of-box model defaults for current validated cameras: keep V3 bridge behavior unchanged, keep V4 on the stable KVS-first probe mode by default, and route Bulb Cam SD feeds to the bridge `sub` path unless users explicitly pin `main`.
 
 ## What's Changed in v4.3.3
 

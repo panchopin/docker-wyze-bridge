@@ -564,7 +564,9 @@ def bridge_camera_state(cam_uri: str) -> dict:
             if not isinstance(feed, dict):
                 continue
             if "enabled" in feed:
-                if sd_only:
+                if not feed.get("enabled"):
+                    state[feed_name] = False
+                elif sd_only:
                     state[feed_name] = bool(feed.get("enabled"))
                 elif published is None or feed.get("path") == "native":
                     state[feed_name] = feed.get("enabled")

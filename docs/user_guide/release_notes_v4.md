@@ -1,5 +1,13 @@
 # Release Notes 4.3
 
+## 4.3.5 Release
+
+`4.3.5` is a narrow native-SD durability patch for the `4.3` release line.
+
+- The Home Assistant go2rtc sidecar now respects explicit per-feed bridge config when it builds native aliases, so a camera configured with `HD=false` and `SD=true` no longer seeds a competing fake HD alias alongside the real `-sd` alias.
+- Native snapshot refresh now forces one fresh re-preload attempt when the selected native alias has gone stale, which helps the bridge recover from the split-brain case where go2rtc still has producer metadata but `frame.jpeg` is no longer returning a real JPEG.
+- The regression coverage now locks both behaviors in place: SD-only alias generation stays honest, and stale selected native aliases get a single forced warm-up retry before fallback.
+
 ## 4.3.3 Release
 
 `4.3.3` is a narrow SD-only native-feed reliability patch for the `4.3` release line.

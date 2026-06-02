@@ -15,6 +15,12 @@ Create local WebRTC, RTSP, RTMP, and HLS streams for Wyze cameras without custom
 - WebRTC/KVS-backed bridge path for modern Wyze models.
 - Native Home Assistant `go2rtc` RTSP sidecar on `:19554` for supported 4.3 workflows.
 
+## 4.3.5 Highlights
+
+- Native SD-only Home Assistant cameras no longer seed a competing fake HD `go2rtc` alias when per-camera feed config explicitly disables HD. This keeps the intended `*-sd` RTSP target stable for downstream consumers like Scrypted and HomeKit.
+- When a selected native alias goes stale, the bridge now forces one fresh native preload before giving up on the native snapshot path. That narrows the split-brain case where producer metadata still exists but `frame.jpeg` has stopped returning real images.
+- This is a narrow reliability patch for the `4.3` line; the broader Home Assistant startup, snapshot, SD-only, WHEP, and packaging hygiene work remains from `4.3.2`.
+
 ## 4.3.4 Highlights
 
 - WHEP reconnects now reject missing upstream peer connections as recoverable stream errors instead of panicking the proxy process during camera reconnect storms.

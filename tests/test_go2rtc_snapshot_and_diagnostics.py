@@ -412,6 +412,35 @@ class TestGo2RtcSnapshotAndDiagnostics(unittest.TestCase):
             ],
         )
 
+    @patch.object(stream_manager_module, "preload_native_stream")
+    @patch.object(stream_manager_module, "write_native_snapshot")
+    def test_stream_manager_repreloads_stale_native_alias_after_failed_snapshot(
+        self, mock_write_native_snapshot, mock_preload
+    ):
+        manager = StreamManager(DummyApi())
+        manager.native_preloads.add("north-yard")
+        manager.streams["north-yard"] = SimpleNamespace(
+            get_info=lambda: {
+                "native_selected": True,
+                "native_api_reachable": True,
+                "native_alias": "north-yard",
+            }
+        )
+        mock_preload.return_value = {"ok": True}
+        mock_write_native_snapshot.side_effect = [False, True]
+
+        result = manager.get_snapshot("north-yard")
+
+        self.assertEqual(result, {"ok": True, "source": "go2rtc"})
+        mock_preload.assert_called_once_with("north-yard")
+        self.assertEqual(
+            mock_write_native_snapshot.call_args_list,
+            [
+                call("north-yard", "north-yard", warn_on_failure=True),
+                call("north-yard", "north-yard", warn_on_failure=True),
+            ],
+        )
+
     @patch.object(StreamManager, "get_snapshot")
     def test_refresh_preview_falls_back_to_cloud_thumbnail(self, mock_get_snapshot):
         api = DummyApi()
