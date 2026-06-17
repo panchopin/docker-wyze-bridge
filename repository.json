@@ -1,5 +1,5 @@
 {
-    "name": "docker-wyze-bridge-v4",
-    "url": "https://github.com/thatdaveguy1/docker-wyze-bridge",
-    "maintainer": "thatdaveguy1"
+    "name": "docker-wyze-bridge-v4 (panchopin fork)",
+    "url": "https://github.com/panchopin/docker-wyze-bridge",
+    "maintainer": "panchopin"
 }
