@@ -166,6 +166,20 @@ class WyzeBridge(Thread):
             if create_sub:
                 self.add_substream(user, self.api, cam, options)
 
+            # Native-only cams (e.g. HL_CAM4 served by the go2rtc sidecar) are
+            # skipped above: create_main/create_sub require feed.path ∈ {"main","sub"}
+            # but their feed.path is "native". They live entirely in go2rtc, so
+            # MediaMTX never sees them and RECORD: true silently does nothing.
+            # Wire a MediaMTX passthrough path here that pulls from go2rtc's RTSP
+            # listener so the recorder (and other MTX-attached features) work.
+            if not (create_main or create_sub):
+                native_info = native_stream_info(cam, substream=False)
+                if native_info.get("native_selected") and native_info.get("native_rtsp_url"):
+                    self.mtx.add_path(cam.name_uri, on_demand=False, is_kvs=False)
+                    self.mtx.add_source(cam.name_uri, native_info["native_rtsp_url"])
+                    if env_cam("record", cam.name_uri):
+                        self.mtx.record(cam.name_uri)
+
     def _camera_catalog_entry(self, cam: WyzeCamera) -> dict:
         config = self.camera_stream_config(cam)
         feeds = config["feeds"]
