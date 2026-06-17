@@ -150,6 +150,16 @@ class WyzeBridge(Thread):
                 self.mtx.add_path(stream.uri, not options.reconnect, stream.uses_kvs_source)
                 self.streams.add(stream)
 
+                # For cameras served by the go2rtc native sidecar (e.g. HL_CAM4),
+                # the MediaMTX path is left empty by add_path(), so MediaMTX has no
+                # source to record from. Wire it to pull from go2rtc's RTSP listener
+                # so RECORD: true (and any other MTX-attached feature) works the same
+                # way it does for KVS/TUTK cams.
+                if not stream.uses_kvs_source:
+                    native_info = native_stream_info(cam, substream=False)
+                    if native_info.get("native_selected") and native_info.get("native_rtsp_url"):
+                        self.mtx.add_source(stream.uri, native_info["native_rtsp_url"])
+
                 if env_cam("record", cam.name_uri):
                     self.mtx.record(stream.uri)
 
@@ -460,6 +470,15 @@ class WyzeBridge(Thread):
             sub = WyzeStream(user, api, cam, sub_opt)
             self.mtx.add_path(sub.uri, not options.reconnect, sub.uses_kvs_source)
             self.streams.add(sub)
+
+            # Same go2rtc-source wiring for substreams (e.g. HL_CAM4 brcam-sd),
+            # so SUB_RECORD: true actually produces recordings.
+            if not sub.uses_kvs_source:
+                native_info = native_stream_info(cam, substream=True)
+                if native_info.get("native_selected") and native_info.get("native_rtsp_url"):
+                    self.mtx.add_source(sub.uri, native_info["native_rtsp_url"])
+                    if record:
+                        self.mtx.record(sub.uri)
 
     def clean_up(self, *_):
         """Stop all streams and clean up before shutdown."""
