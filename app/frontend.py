@@ -580,25 +580,20 @@ def create_app():
     @app.route("/snapshot/<string:img_file>")
     @auth_required
     def rtsp_snapshot(img_file: str):
-        """Use ffmpeg to take a snapshot from the rtsp stream."""
-        if config.SNAPSHOT_TYPE == "api":
-            return thumbnail(img_file)
-        # Fast-fail for cams that aren't currently connected. get_snapshot()
-        # otherwise blocks on a multi-second wake-up attempt; with several
-        # offline cams the UI saturates the browser's per-origin HTTP/1.1
-        # pool and the page appears blank.
-        cam_name = Path(img_file).stem
-        stream = wb.streams.get(cam_name)
-        if not stream or not stream.connected:
-            img_path = config.IMG_PATH + img_file
-            with contextlib.suppress(OSError, ValueError):
-                if os.path.getsize(img_path) > 0 and preview_file_is_image(img_path):
-                    return send_from_directory(config.IMG_PATH, img_file)
-            return redirect("/static/notavailable.svg", code=307)
-        if wb.streams.get_snapshot(cam_name)["ok"]:
-            return send_from_directory(config.IMG_PATH, img_file)
+        """Serve the cached snapshot; never block on a fresh RTSP fetch.
 
-        return thumbnail(img_file)
+        The previous implementation called wb.streams.get_snapshot() which
+        spawns ffmpeg with a 45 s timeout, and stream.status() reports
+        "connected" even for cams whose underlying source is failing — so
+        gating on stream.connected didn't help. Live-stream watchers and
+        the recorder keep cached snapshots fresh for online cams; offline
+        cams just serve their last good frame or a placeholder.
+        """
+        img_path = config.IMG_PATH + img_file
+        with contextlib.suppress(OSError, ValueError):
+            if os.path.getsize(img_path) > 0 and preview_file_is_image(img_path):
+                return send_from_directory(config.IMG_PATH, img_file)
+        return redirect("/static/notavailable.svg", code=307)
 
     @app.route("/img/<string:img_file>")
     @auth_required
@@ -626,27 +621,24 @@ def create_app():
                     raise NotFound
             return send_from_directory(config.IMG_PATH, img_file)
         except (NotFound, FileNotFoundError, ValueError):
-            if config.SNAPSHOT_TYPE == "api":
-                return thumbnail(img_file)
-            # Fast-fail for offline cams (see rtsp_snapshot rationale).
-            cam_name = Path(img_file).stem
-            stream = wb.streams.get(cam_name)
-            if not stream or not stream.connected:
-                return redirect("/static/notavailable.svg", code=307)
-            return rtsp_snapshot(img_file)
+            # Never block on a fresh fetch — see rtsp_snapshot for rationale.
+            return redirect("/static/notavailable.svg", code=307)
 
     @app.route("/thumb/<string:img_file>")
     @auth_required
     def thumbnail(img_file: str):
+        """Serve the cached thumb; never block on refresh_preview()."""
         path = Path(img_file)
         stem = path.stem
         candidates = [stem]
         if stem.endswith("-sub"):
             candidates.append(stem.removesuffix("-sub"))
         for uri in candidates:
-            if wb.streams.refresh_preview(uri)["ok"]:
-                return send_from_directory(config.IMG_PATH, f"{uri}{path.suffix}")
-
+            candidate = f"{uri}{path.suffix}"
+            cached_path = config.IMG_PATH + candidate
+            with contextlib.suppress(OSError, ValueError):
+                if os.path.getsize(cached_path) > 0 and preview_file_is_image(cached_path):
+                    return send_from_directory(config.IMG_PATH, candidate)
         return redirect("/static/notavailable.svg", code=307)
 
     @app.route("/photo/<string:img_file>")
