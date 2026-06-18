@@ -583,7 +583,19 @@ def create_app():
         """Use ffmpeg to take a snapshot from the rtsp stream."""
         if config.SNAPSHOT_TYPE == "api":
             return thumbnail(img_file)
-        if wb.streams.get_snapshot(Path(img_file).stem)["ok"]:
+        # Fast-fail for cams that aren't currently connected. get_snapshot()
+        # otherwise blocks on a multi-second wake-up attempt; with several
+        # offline cams the UI saturates the browser's per-origin HTTP/1.1
+        # pool and the page appears blank.
+        cam_name = Path(img_file).stem
+        stream = wb.streams.get(cam_name)
+        if not stream or not stream.connected:
+            img_path = config.IMG_PATH + img_file
+            with contextlib.suppress(OSError, ValueError):
+                if os.path.getsize(img_path) > 0 and preview_file_is_image(img_path):
+                    return send_from_directory(config.IMG_PATH, img_file)
+            return redirect("/static/notavailable.svg", code=307)
+        if wb.streams.get_snapshot(cam_name)["ok"]:
             return send_from_directory(config.IMG_PATH, img_file)
 
         return thumbnail(img_file)
@@ -616,6 +628,11 @@ def create_app():
         except (NotFound, FileNotFoundError, ValueError):
             if config.SNAPSHOT_TYPE == "api":
                 return thumbnail(img_file)
+            # Fast-fail for offline cams (see rtsp_snapshot rationale).
+            cam_name = Path(img_file).stem
+            stream = wb.streams.get(cam_name)
+            if not stream or not stream.connected:
+                return redirect("/static/notavailable.svg", code=307)
             return rtsp_snapshot(img_file)
 
     @app.route("/thumb/<string:img_file>")

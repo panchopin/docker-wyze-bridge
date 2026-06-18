@@ -2,7 +2,7 @@ name: Docker Wyze Bridge (panchopin fork)
 description: WebRTC/RTSP/RTMP/LL-HLS bridge for Wyze cameras with Home Assistant support and a native go2rtc sidecar.
 slug: docker_wyze_bridge_v4_panchopin
 url: https://github.com/panchopin/docker-wyze-bridge
-version: 4.3.8
+version: 4.3.9
 stage: stable
 image: ghcr.io/panchopin/docker-wyze-bridge
 arch:
