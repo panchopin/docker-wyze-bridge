@@ -168,11 +168,15 @@ class StreamManager:
 
                 while not self.stop_flag:
                     for cam, ffmpeg in list(self.rtsp_snapshots.items()):
+                        # poll() reaps the process and populates returncode;
+                        # reading ffmpeg.returncode alone leaves it None forever
+                        # so the snapshot .tmp is never promoted to the final file.
                         if (
                             not self.stop_flag
                             and ffmpeg is not None
-                            and (returncode := ffmpeg.returncode) is not None
+                            and ffmpeg.poll() is not None
                         ):
+                            returncode = ffmpeg.returncode
                             if returncode == 0:
                                 stderr_output = b""
                                 with contextlib.suppress(Exception):
