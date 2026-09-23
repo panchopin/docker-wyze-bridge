@@ -482,6 +482,65 @@ class TestHomeAssistantAddonPackaging(unittest.TestCase):
                 )
                 self.assertNotIn("go2rtc/releases/download", dockerfile_text)
 
+    def test_go2rtc_copy_is_a_standalone_instruction(self):
+        """Guard the shape of the edit, not just its presence.
+
+        Inserting the COPY into the middle of the long RUN block once left it
+        ending in a backslash, which swallowed the following shell lines as
+        extra COPY sources; the image build then failed with
+        "failed to calculate checksum of ref ...: /BUILD_DATE=...: not found".
+        Joining continuations and inspecting the resulting instructions catches
+        that, while a plain substring search does not.
+        """
+        dockerfiles = [
+            ROOT / "docker" / "Dockerfile",
+            ROOT / "docker" / "Dockerfile.multiarch",
+            ROOT / "docker" / "Dockerfile.hwaccel",
+            ROOT / "home_assistant" / "Dockerfile",
+            ROOT / ".ha_live_addon" / "Dockerfile",
+            ROOT / "runtime_overlays" / "home_assistant" / "Dockerfile",
+            ROOT / "runtime_overlays" / "ha_live_addon" / "Dockerfile",
+        ]
+
+        def instructions(text):
+            joined, buffer = [], ""
+            for raw in text.splitlines():
+                stripped = raw.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                if stripped.endswith("\\"):
+                    buffer += stripped[:-1] + " "
+                    continue
+                joined.append((buffer + stripped).strip())
+                buffer = ""
+            if buffer:
+                joined.append(buffer.strip())
+            return joined
+
+        for dockerfile_path in dockerfiles:
+            with self.subTest(dockerfile=str(dockerfile_path.relative_to(ROOT))):
+                parsed = instructions(dockerfile_path.read_text())
+
+                copies = [i for i in parsed if i.startswith("COPY --from=go2rtc_builder")]
+                self.assertEqual(len(copies), 1, "expected exactly one go2rtc COPY")
+                self.assertEqual(
+                    copies[0],
+                    "COPY --from=go2rtc_builder /out/go2rtc /build/usr/local/bin/go2rtc",
+                    "the COPY must carry only its source and destination",
+                )
+
+                owners = [i for i in parsed if "rm -rf app/*.txt" in i]
+                self.assertEqual(len(owners), 1)
+                self.assertTrue(
+                    owners[0].startswith("RUN "),
+                    "the cleanup must stay inside its RUN, not leak into another instruction",
+                )
+                self.assertIn(
+                    "echo BUILD_DATE",
+                    owners[0],
+                    "the BUILD_DATE block belongs to the same RUN as the cleanup",
+                )
+
     def test_go2rtc_patches_are_mirrored_into_every_runtime_tree(self):
         """The add-on Dockerfiles read the patches out of app/, so every
         runtime tree needs its copy or the build silently ships stock go2rtc."""

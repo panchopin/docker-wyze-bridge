@@ -80,14 +80,14 @@ RUN set -eux; \
     cp app/lib/lib.${TARGETARCH} usr/local/lib/libIOTCAPIs_ALL.so; \
     if [ "$QSV" = "1" ]; \
         then cp -R /usr/lib/x86_64-linux-gnu/ usr/lib/; \
-    fi;
-
-COPY --from=go2rtc_builder /out/go2rtc /build/usr/local/bin/go2rtc \
+    fi; \
     rm -rf app/*.txt app/lib/ app/patches/; \
     if [ -z "${BUILD_DATE}" ]; \
         then echo BUILD_DATE=$(date) > .build_date; \
         else echo BUILD_DATE=${BUILD_DATE} > .build_date; \
     fi;
+
+COPY --from=go2rtc_builder /out/go2rtc /build/usr/local/bin/go2rtc
 
 FROM base
 ARG BUILD
