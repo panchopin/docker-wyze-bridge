@@ -1,5 +1,26 @@
 # What's Changed
 
+## What's Changed in v4.3.13
+
+Fixes the go2rtc timestamp patch shipped in 4.3.12, which did not work.
+
+### Major Changes
+
+- Measure the lost-seconds correction against the connection's shared origin
+  instead of against the previous frame. 4.3.12 compared each frame with the
+  one before it; audio arrives in bursts, so a stall that merely *looked* like
+  a lost second added one that was never taken back, and those errors
+  integrated. On the real camera the audio timeline ran away from video at
+  about 1.2s per minute — video read 285.1s against audio's 291.3s after 4.8
+  minutes, the opposite direction from the original bug and just as damaging.
+  Closing the loop on a fixed origin lets delivery jitter average out rather
+  than accumulate, and the correction now only ever adds seconds, which keeps
+  the timeline monotonic for free.
+- Add a simulation over ten minutes of frame spacing measured off the camera,
+  with audio delivered in bursts, carrying the 4.3.12 algorithm alongside for
+  comparison: it walks 12.0s apart over that run, the new one ends 0.03s apart
+  with 99.4% of samples inside 0.5s.
+
 ## What's Changed in v4.3.12
 
 Recovers audio that the MediaMTX recorder was silently discarding on native

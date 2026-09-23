@@ -1,5 +1,5 @@
 diff --git a/pkg/tutk/frame.go b/pkg/tutk/frame.go
-index db5bf07..2e0fd0a 100644
+index db5bf07..9864301 100644
 --- a/pkg/tutk/frame.go
 +++ b/pkg/tutk/frame.go
 @@ -5,6 +5,7 @@ import (
@@ -75,25 +75,46 @@ index db5bf07..2e0fd0a 100644
  	}
  
  	var delta uint32
-@@ -234,14 +280,27 @@ func (t *tsTracker) update(rawTS uint32) uint64 {
+@@ -234,14 +280,48 @@ func (t *tsTracker) update(rawTS uint32) uint64 {
  		delta = (tsWrapPeriod - t.lastRawTS) + rawTS
  	}
  
 -	t.accumUS += uint64(delta)
-+	advance := uint64(delta)
+ 	t.lastRawTS = rawTS
++	t.lastWall = now
 +
-+	// Recover the whole seconds the camera's counter cannot express.  Rounding
-+	// to the nearest second absorbs up to half a second of delivery jitter.
-+	if wall := now.Sub(t.lastWall); wall > 0 {
-+		missing := (wall - time.Duration(delta)*time.Microsecond + time.Second/2) / time.Second
-+		if missing > 0 {
-+			advance += uint64(missing) * uint64(tsWrapPeriod)
++	projected := t.accumUS + uint64(delta)
++
++	// Recover the whole seconds the camera's counter cannot express, by
++	// comparing the rebuilt timeline against real time since the shared
++	// origin.  Measuring against the *previous frame* instead would integrate
++	// every delivery hiccup and never shed it: audio arrives in bursts, so a
++	// gap that merely looks long adds a second that is never taken back, and
++	// the track runs away from video at a steady clip.  Closing the loop on a
++	// fixed origin lets jitter average out instead of accumulating.
++	if t.base != nil && t.base.set {
++		if elapsed := now.Sub(t.base.epoch); elapsed > 0 {
++			drift := int64(elapsed/time.Microsecond) - int64(projected)
++
++			// Whole seconds only, and only ever added: the camera owns the
++			// sub-second part, and a drift under one second is jitter rather
++			// than a lost second.  Only adding also keeps the timeline
++			// monotonic for free, which downstream depends on.
++			//
++			// Holding the timeline back when it runs ahead was tried and
++			// removed: frames arrive bunched after a stall, so real time
++			// briefly advances slower than the camera clock and the hold
++			// fired on ordinary catch-up, pulling the track away from its
++			// pair by most of a second.  Overshoot is self-limiting anyway —
++			// once the timeline passes real time the drift drops below a
++			// second and no further seconds are added.
++			if whole := drift / int64(tsWrapPeriod); whole > 0 {
++				projected += uint64(whole) * uint64(tsWrapPeriod)
++			}
 +		}
 +	}
 +
-+	t.accumUS += advance
- 	t.lastRawTS = rawTS
-+	t.lastWall = now
++	t.accumUS = projected
  
  	return t.accumUS
  }
@@ -104,7 +125,7 @@ index db5bf07..2e0fd0a 100644
  	videoTS  tsTracker
  	audioTS  tsTracker
  	output   chan *Packet
-@@ -251,11 +310,14 @@ type FrameHandler struct {
+@@ -251,11 +331,14 @@ type FrameHandler struct {
  }
  
  func NewFrameHandler(verbose bool) *FrameHandler {
@@ -120,7 +141,7 @@ index db5bf07..2e0fd0a 100644
  }
  
  func (h *FrameHandler) Recv() <-chan *Packet {
-@@ -423,7 +485,7 @@ func (h *FrameHandler) handleVideo(channel byte, hdr *PacketHeader, payload []by
+@@ -423,7 +506,7 @@ func (h *FrameHandler) handleVideo(channel byte, hdr *PacketHeader, payload []by
  		return
  	}
  
@@ -129,7 +150,7 @@ index db5bf07..2e0fd0a 100644
  	rtpTS := uint32(accumUS * 90000 / 1000000)
  
  	pkt := &Packet{
-@@ -471,7 +533,7 @@ func (h *FrameHandler) handleAudio(payload []byte, fi *FrameInfo) {
+@@ -471,7 +554,7 @@ func (h *FrameHandler) handleAudio(payload []byte, fi *FrameInfo) {
  		channels = fi.Channels()
  	}
  
@@ -138,6 +159,293 @@ index db5bf07..2e0fd0a 100644
  	rtpTS := uint32(accumUS * uint64(sampleRate) / 1000000)
  
  	payloadCopy := make([]byte, len(payload))
+diff --git a/pkg/tutk/frame_ts_sim_test.go b/pkg/tutk/frame_ts_sim_test.go
+new file mode 100644
+index 0000000..9e2db18
+--- /dev/null
++++ b/pkg/tutk/frame_ts_sim_test.go
+@@ -0,0 +1,281 @@
++package tutk
++
++import (
++	"testing"
++	"time"
++)
++
++// Frame spacings measured off a real HL_CAM4 (go2rtc verbose output,
++// 2026-09-23).  Video is metronomic; audio alternates 40ms and 80ms and
++// averages the 64ms of one 1024-sample AAC frame at 16kHz.
++// One stall roughly every 48s of audio, which reproduces the ~1.25s/min the
++// per-frame correction was measured running away at on the real camera.
++const audioBurstEvery = 750
++
++var (
++	realVideoDeltas = []uint32{49972, 49971, 49971, 49974, 49965, 49975, 49967, 49971, 49979, 49971, 49968, 49971}
++	realAudioDeltas = []uint32{
++		80006, 80016, 40012, 80010, 40005, 80018, 80012, 80022, 40005, 80022, 80020, 40029,
++		80010, 40012, 80029, 80008, 40007, 80024, 40007, 80016, 80029, 40006, 80017, 40007,
++		80027, 80014, 40007, 80023, 40006, 80017, 80020, 40011, 80019, 40008, 80014, 80030,
++	}
++)
++
++// openLoopTracker is the first attempt at this fix: it measured the gap
++// against the previous frame instead of a fixed origin.  Kept so the
++// simulation below can show why that does not hold up.
++type openLoopTracker struct {
++	lastRawTS uint32
++	lastWall  time.Time
++	accumUS   uint64
++	firstTS   bool
++	startUS   uint64
++}
++
++func (t *openLoopTracker) update(rawTS uint32, now time.Time) uint64 {
++	if !t.firstTS {
++		t.firstTS = true
++		t.lastRawTS = rawTS
++		t.lastWall = now
++		t.accumUS = t.startUS
++		return t.accumUS
++	}
++	var delta uint32
++	if rawTS >= t.lastRawTS {
++		delta = rawTS - t.lastRawTS
++	} else {
++		delta = (tsWrapPeriod - t.lastRawTS) + rawTS
++	}
++	advance := uint64(delta)
++	if wall := now.Sub(t.lastWall); wall > 0 {
++		missing := (wall - time.Duration(delta)*time.Microsecond + time.Second/2) / time.Second
++		if missing > 0 {
++			advance += uint64(missing) * uint64(tsWrapPeriod)
++		}
++	}
++	t.accumUS += advance
++	t.lastRawTS = rawTS
++	t.lastWall = now
++	return t.accumUS
++}
++
++// deterministic jitter, so a failure is always reproducible
++type rng struct{ s uint64 }
++
++func (r *rng) next(n uint64) uint64 {
++	r.s = r.s*6364136223846793005 + 1442695040888963407
++	return (r.s >> 33) % n
++}
++
++type arrival struct {
++	raw   uint32
++	when  time.Duration // since the shared origin
++	audio bool
++}
++
++// buildStream produces one camera's worth of frames, with delivery that is
++// late and bursty the way the real audio track is: the camera keeps perfect
++// time, but frames reach us in clumps after sub-second stalls.
++// Both tracks must be generated over the same span of camera time, not the
++// same number of frames: audio frames are 64ms and video frames 50ms, so
++// equal counts would end tens of seconds apart and look exactly like drift.
++func buildStream(deltas []uint32, startRaw uint32, span time.Duration, audio bool, r *rng, burstEvery int) []arrival {
++	out := []arrival{}
++	var cameraUS uint64
++	raw := startRaw
++	var held time.Duration
++	limit := uint64(span / time.Microsecond)
++
++	for i := 0; cameraUS <= limit; i++ {
++		d := deltas[i%len(deltas)]
++		if i > 0 {
++			cameraUS += uint64(d)
++			raw = uint32((uint64(raw) + uint64(d)) % uint64(tsWrapPeriod))
++			if cameraUS > limit {
++				break
++			}
++		}
++		when := time.Duration(cameraUS) * time.Microsecond
++
++		// A stall holds one frame back by 600-900ms — under the one-second
++		// mark, so no second was really lost — and the frames behind it then
++		// arrive bunched up as delivery catches back up.  That leading gap is
++		// what a per-frame correction mistakes for a lost second.
++		if burstEvery > 0 && i > 0 && i%burstEvery == 0 {
++			held = time.Duration(600+r.next(300)) * time.Millisecond
++		}
++		when += held
++		if held > 0 {
++			if held > 200*time.Millisecond {
++				held -= 200 * time.Millisecond
++			} else {
++				held = 0
++			}
++		}
++		when += time.Duration(r.next(25)) * time.Millisecond // ordinary jitter
++
++		out = append(out, arrival{raw: raw, when: when, audio: audio})
++	}
++	return out
++}
++
++func merge(a, b []arrival) []arrival {
++	out := make([]arrival, 0, len(a)+len(b))
++	i, j := 0, 0
++	for i < len(a) || j < len(b) {
++		switch {
++		case j >= len(b) || (i < len(a) && a[i].when <= b[j].when):
++			out = append(out, a[i])
++			i++
++		default:
++			out = append(out, b[j])
++			j++
++		}
++	}
++	return out
++}
++
++// TestClosedLoopDoesNotDriftUnderBurstyDelivery is the regression this patch
++// exists for.  Ten minutes of measured frame spacing with audio delivered in
++// bursts: what must not happen is the two timelines *walking apart*, because
++// MediaMTX's fMP4 recorder discards audio that falls before the current
++// segment's start and the gap never closes on its own.
++//
++// Brief excursions during a stall are fine — they cost a frame or two.  A
++// steady divergence costs the whole audio track.
++func TestClosedLoopDoesNotDriftUnderBurstyDelivery(t *testing.T) {
++	const span = 10 * time.Minute
++
++	r := &rng{s: 42}
++	video := buildStream(realVideoDeltas, 694144, span, false, r, 0)
++	audio := buildStream(realAudioDeltas, 52613, span, true, r, audioBurstEvery)
++	stream := merge(video, audio)
++
++	epoch := time.Unix(1700000000, 0)
++	h := NewFrameHandler(false)
++
++	var lastVideo, lastAudio uint64
++	var worst int64
++	var splits []int64
++	for _, f := range stream {
++		now := epoch.Add(f.when)
++		if f.audio {
++			lastAudio = h.audioTS.update(f.raw, now)
++		} else {
++			lastVideo = h.videoTS.update(f.raw, now)
++		}
++		if lastVideo == 0 || lastAudio == 0 {
++			continue
++		}
++		gap := int64(lastVideo) - int64(lastAudio)
++		if gap < 0 {
++			gap = -gap
++		}
++		splits = append(splits, gap)
++		if gap > worst {
++			worst = gap
++		}
++	}
++
++	final := int64(lastVideo) - int64(lastAudio)
++	if final < 0 {
++		final = -final
++	}
++
++	// How often the split is small, rather than how bad one spike got.
++	var wide int
++	for _, g := range splits {
++		if g > int64(500*time.Millisecond/time.Microsecond) {
++			wide++
++		}
++	}
++	widePct := float64(wide) * 100 / float64(len(splits))
++
++	t.Logf("after %v: final split %.3fs, worst %.3fs, %.2f%% of samples over 0.5s",
++		span, float64(final)/1e6, float64(worst)/1e6, widePct)
++
++	// The actual bug: the tracks must not end up apart.
++	if final > int64(250*time.Millisecond/time.Microsecond) {
++		t.Fatalf("tracks ended %.3fs apart, want under 0.25s", float64(final)/1e6)
++	}
++	// And the split must be small almost all of the time, not just at the end.
++	if widePct > 1.0 {
++		t.Fatalf("split exceeded 0.5s in %.2f%% of samples, want under 1%%", widePct)
++	}
++	// Excursions during a stall are tolerable but must stay bounded.
++	if worst > int64(1500*time.Millisecond/time.Microsecond) {
++		t.Fatalf("worst excursion %.3fs, want under 1.5s", float64(worst)/1e6)
++	}
++}
++
++// TestOpenLoopDriftsUnderTheSameDelivery shows the test above is not passing
++// by luck.  The per-frame version walks away at about 1.2s per minute here,
++// which is what the real camera was measured doing (video 285.1s against
++// audio 291.3s after 4.8 minutes) — the model is calibrated against that.
++func TestOpenLoopDriftsUnderTheSameDelivery(t *testing.T) {
++	const span = 10 * time.Minute
++	r := &rng{s: 42}
++	video := buildStream(realVideoDeltas, 694144, span, false, r, 0)
++	audio := buildStream(realAudioDeltas, 52613, span, true, r, audioBurstEvery)
++	stream := merge(video, audio)
++
++	epoch := time.Unix(1700000000, 0)
++	var vt, at openLoopTracker
++	var lastVideo, lastAudio uint64
++	for _, f := range stream {
++		now := epoch.Add(f.when)
++		if f.audio {
++			lastAudio = at.update(f.raw, now)
++		} else {
++			lastVideo = vt.update(f.raw, now)
++		}
++	}
++
++	split := int64(lastAudio) - int64(lastVideo)
++	t.Logf("open loop ended %.1fs apart after %v", float64(split)/1e6, span)
++	if split < int64(3*time.Second/time.Microsecond) {
++		t.Fatalf("expected the open loop to run away by seconds, got %.3fs", float64(split)/1e6)
++	}
++}
++
++// TestClosedLoopStillRecoversARealGap: bounding the correction must not cost
++// us the thing it was added for.
++func TestClosedLoopStillRecoversARealGap(t *testing.T) {
++	epoch := time.Unix(1700000000, 0)
++	h := NewFrameHandler(false)
++
++	const startRaw = 500000
++	h.videoTS.update(startRaw, epoch)
++
++	// The camera really did stop for 3.2s, and says so in its own clock.
++	gap := 3200 * time.Millisecond
++	got := h.videoTS.update(rawAt(startRaw, gap), epoch.Add(gap))
++
++	if want := uint64(gap / time.Microsecond); got != want {
++		t.Fatalf("after a %v gap the timeline advanced %d us, want %d us", gap, got, want)
++	}
++}
++
++// TestClosedLoopNeverGoesBackwards: downstream consumers need a clock that
++// only moves forward, so an over-corrected timeline must stall, not rewind.
++func TestClosedLoopNeverGoesBackwards(t *testing.T) {
++	epoch := time.Unix(1700000000, 0)
++	h := NewFrameHandler(false)
++
++	const startRaw = 100000
++	prev := h.videoTS.update(startRaw, epoch)
++
++	// Frames whose camera clock races ahead of real time.
++	cameraUS := uint64(0)
++	for i := 1; i <= 200; i++ {
++		cameraUS += 50000
++		raw := uint32((uint64(startRaw) + cameraUS) % uint64(tsWrapPeriod))
++		// real time advances at a quarter of that rate
++		now := epoch.Add(time.Duration(cameraUS/4) * time.Microsecond)
++		got := h.videoTS.update(raw, now)
++		if got < prev {
++			t.Fatalf("timeline went backwards at frame %d: %d after %d", i, got, prev)
++		}
++		prev = got
++	}
++}
 diff --git a/pkg/tutk/frame_ts_test.go b/pkg/tutk/frame_ts_test.go
 new file mode 100644
 index 0000000..ecfae64

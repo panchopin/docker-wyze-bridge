@@ -33,9 +33,26 @@ The patch gives every track of a connection one shared origin and uses frame
 arrival time to recover the whole seconds the camera's counter cannot express.
 Arrival time decides only *how many whole seconds* to add and where a track's
 timeline starts; the camera's counter still supplies the exact sub-second
-spacing, which is what A/V sync depends on. Rounding to the nearest second
-absorbs up to 500ms of delivery jitter.
+spacing, which is what A/V sync depends on.
+
+**The correction is measured against that shared origin, not against the
+previous frame.** The first version of this patch compared each frame with the
+one before it, and shipped as 4.3.12 without fixing anything: audio arrives in
+bursts, so a stall that merely *looks* like a lost second adds one that is
+never taken back, and the errors integrate. Measured on the real camera after
+4.8 minutes, video read 285.1s while audio read 291.3s — a runaway of about
+1.2s per minute, in the opposite direction from the original bug. Closing the
+loop on a fixed origin lets jitter average out instead of accumulating, and the
+correction only ever *adds* seconds, which keeps the timeline monotonic for
+free. Overshoot is self-limiting: once the timeline passes real time the drift
+drops below a second and nothing further is added.
 
 `pkg/tutk/frame_ts_test.go` comes with the patch and includes the pre-patch
 algorithm, so each scenario is shown failing against the old code and passing
 against the new one.
+
+`pkg/tutk/frame_ts_sim_test.go` replays ten minutes of frame spacing measured
+off the real camera, with audio delivered in bursts, and carries the
+per-frame version alongside for comparison. Calibrated against the live
+measurement above: the per-frame version walks 12.0s apart over that run, the
+shared-origin version ends 0.03s apart with 99.4% of samples inside 0.5s.
