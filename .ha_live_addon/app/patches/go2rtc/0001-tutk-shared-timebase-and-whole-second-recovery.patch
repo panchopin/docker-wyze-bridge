@@ -1,0 +1,397 @@
+diff --git a/pkg/tutk/frame.go b/pkg/tutk/frame.go
+index db5bf07..2e0fd0a 100644
+--- a/pkg/tutk/frame.go
++++ b/pkg/tutk/frame.go
+@@ -5,6 +5,7 @@ import (
+ 	"encoding/hex"
+ 	"fmt"
+ 	"sync"
++	"time"
+ 
+ 	"github.com/AlexxIT/go2rtc/pkg/aac"
+ )
+@@ -213,17 +214,62 @@ func (cs *channelState) reset() {
+ 
+ const tsWrapPeriod uint32 = 1000000
+ 
++// The camera stamps each frame with the microsecond part of its clock only:
++// the field counts 0..999999 and wraps every second, and the seconds themselves
++// are never transmitted.  Reconstructing elapsed time from those deltas alone
++// has two consequences that have to be corrected here.
++//
++// First, a gap longer than one second is invisible.  The wrap branch below can
++// only ever assume a single wrap, so if a track stalls for 1.4s the delta reads
++// 0.4s and the whole second is lost from that track's timeline, permanently.
++//
++// Second, video and audio are separate counters.  Zeroing each one on its own
++// first frame gives the two tracks unrelated origins, so they start out offset
++// by however long the second track took to show up.
++//
++// Both are resolved with the frame's arrival time, which is accurate to well
++// under a second on a local link.  Arrival time decides only how many *whole*
++// seconds to add and where a track's timeline begins; the camera's counter
++// still supplies the exact sub-second spacing, which is what actually matters
++// for A/V sync and frame pacing.
++//
++// Getting this wrong is not cosmetic: MediaMTX's fMP4 recorder discards audio
++// samples that fall before the current segment's start, so a slipped audio
++// timeline silently drops audio from recordings.
++
++// tsBase is the origin shared by every track of one connection.
++type tsBase struct {
++	epoch time.Time
++	set   bool
++}
++
+ type tsTracker struct {
++	base      *tsBase
+ 	lastRawTS uint32
++	lastWall  time.Time
+ 	accumUS   uint64
+ 	firstTS   bool
+ }
+ 
+-func (t *tsTracker) update(rawTS uint32) uint64 {
++func (t *tsTracker) update(rawTS uint32, now time.Time) uint64 {
+ 	if !t.firstTS {
+ 		t.firstTS = true
+ 		t.lastRawTS = rawTS
+-		return 0
++		t.lastWall = now
++
++		if t.base == nil || !t.base.set {
++			if t.base != nil {
++				t.base.epoch = now
++				t.base.set = true
++			}
++			t.accumUS = 0
++		} else if since := now.Sub(t.base.epoch); since > 0 {
++			// Another track already defined the origin; join its timeline
++			// instead of starting a second one at zero.
++			t.accumUS = uint64(since / time.Microsecond)
++		}
++
++		return t.accumUS
+ 	}
+ 
+ 	var delta uint32
+@@ -234,14 +280,27 @@ func (t *tsTracker) update(rawTS uint32) uint64 {
+ 		delta = (tsWrapPeriod - t.lastRawTS) + rawTS
+ 	}
+ 
+-	t.accumUS += uint64(delta)
++	advance := uint64(delta)
++
++	// Recover the whole seconds the camera's counter cannot express.  Rounding
++	// to the nearest second absorbs up to half a second of delivery jitter.
++	if wall := now.Sub(t.lastWall); wall > 0 {
++		missing := (wall - time.Duration(delta)*time.Microsecond + time.Second/2) / time.Second
++		if missing > 0 {
++			advance += uint64(missing) * uint64(tsWrapPeriod)
++		}
++	}
++
++	t.accumUS += advance
+ 	t.lastRawTS = rawTS
++	t.lastWall = now
+ 
+ 	return t.accumUS
+ }
+ 
+ type FrameHandler struct {
+ 	channels map[byte]*channelState
++	tsBase   tsBase
+ 	videoTS  tsTracker
+ 	audioTS  tsTracker
+ 	output   chan *Packet
+@@ -251,11 +310,14 @@ type FrameHandler struct {
+ }
+ 
+ func NewFrameHandler(verbose bool) *FrameHandler {
+-	return &FrameHandler{
++	h := &FrameHandler{
+ 		channels: make(map[byte]*channelState),
+ 		output:   make(chan *Packet, 128),
+ 		verbose:  verbose,
+ 	}
++	h.videoTS.base = &h.tsBase
++	h.audioTS.base = &h.tsBase
++	return h
+ }
+ 
+ func (h *FrameHandler) Recv() <-chan *Packet {
+@@ -423,7 +485,7 @@ func (h *FrameHandler) handleVideo(channel byte, hdr *PacketHeader, payload []by
+ 		return
+ 	}
+ 
+-	accumUS := h.videoTS.update(fi.Timestamp)
++	accumUS := h.videoTS.update(fi.Timestamp, time.Now())
+ 	rtpTS := uint32(accumUS * 90000 / 1000000)
+ 
+ 	pkt := &Packet{
+@@ -471,7 +533,7 @@ func (h *FrameHandler) handleAudio(payload []byte, fi *FrameInfo) {
+ 		channels = fi.Channels()
+ 	}
+ 
+-	accumUS := h.audioTS.update(fi.Timestamp)
++	accumUS := h.audioTS.update(fi.Timestamp, time.Now())
+ 	rtpTS := uint32(accumUS * uint64(sampleRate) / 1000000)
+ 
+ 	payloadCopy := make([]byte, len(payload))
+diff --git a/pkg/tutk/frame_ts_test.go b/pkg/tutk/frame_ts_test.go
+new file mode 100644
+index 0000000..ecfae64
+--- /dev/null
++++ b/pkg/tutk/frame_ts_test.go
+@@ -0,0 +1,251 @@
++package tutk
++
++import (
++	"testing"
++	"time"
++)
++
++// The camera sends only the microsecond part of its clock, wrapping every
++// second.  These helpers turn an absolute elapsed time into the raw field the
++// camera would have sent.
++func rawAt(startRaw uint32, elapsed time.Duration) uint32 {
++	return uint32((uint64(startRaw) + uint64(elapsed/time.Microsecond)) % uint64(tsWrapPeriod))
++}
++
++func newHandlerForTest() *FrameHandler {
++	return NewFrameHandler(false)
++}
++
++func TestSteadyStreamKeepsSubSecondPrecision(t *testing.T) {
++	h := newHandlerForTest()
++	wall := time.Unix(1700000000, 0)
++	const startRaw = 694144
++	// 20fps, and deliberately not a round 50ms: the camera's own spacing must
++	// survive, because that is what A/V sync depends on.
++	const frame = 49971 * time.Microsecond
++
++	// The first frame establishes the origin and reads zero.
++	if got := h.videoTS.update(startRaw, wall); got != 0 {
++		t.Fatalf("first frame should start the timeline at 0, got %d", got)
++	}
++
++	const frames = 100
++	var last uint64
++	for i := 1; i <= frames; i++ {
++		elapsed := time.Duration(i) * frame
++		wall = wall.Add(frame)
++		last = h.videoTS.update(rawAt(startRaw, elapsed), wall)
++	}
++
++	want := uint64(frames * frame / time.Microsecond)
++	if last != want {
++		t.Fatalf("accumulated %d us over %d frames, want %d us", last, frames, want)
++	}
++}
++
++func TestGapLongerThanOneSecondIsRecovered(t *testing.T) {
++	h := newHandlerForTest()
++	wall := time.Unix(1700000000, 0)
++	const startRaw = 500000
++
++	h.videoTS.update(startRaw, wall)
++
++	// A 3.2s stall: the raw counter wrapped three times, which the field
++	// cannot express.  Unpatched, this advanced the timeline by 200ms and lost
++	// three seconds for good.
++	gap := 3200 * time.Millisecond
++	wall = wall.Add(gap)
++	got := h.videoTS.update(rawAt(startRaw, gap), wall)
++
++	want := uint64(gap / time.Microsecond)
++	if got != want {
++		t.Fatalf("after a %v gap the timeline advanced %d us, want %d us", gap, got, want)
++	}
++}
++
++func TestGapRecoveryToleratesDeliveryJitter(t *testing.T) {
++	h := newHandlerForTest()
++	wall := time.Unix(1700000000, 0)
++	const startRaw = 100000
++
++	h.videoTS.update(startRaw, wall)
++
++	// The camera's clock says 2.5s elapsed; the frame arrives 180ms late.
++	// Rounding to the nearest second must still yield exactly 2.5s.
++	cameraGap := 2500 * time.Millisecond
++	wall = wall.Add(cameraGap + 180*time.Millisecond)
++	got := h.videoTS.update(rawAt(startRaw, cameraGap), wall)
++
++	want := uint64(cameraGap / time.Microsecond)
++	if got != want {
++		t.Fatalf("jittered arrival produced %d us, want %d us", got, want)
++	}
++}
++
++func TestTimelineNeverGoesBackwards(t *testing.T) {
++	h := newHandlerForTest()
++	wall := time.Unix(1700000000, 0)
++	const startRaw = 900000
++
++	prev := h.videoTS.update(startRaw, wall)
++	// Frames arriving out of order, or a wall clock that stepped backwards,
++	// must not rewind the timeline.
++	for _, step := range []time.Duration{-time.Second, 0, 40 * time.Millisecond} {
++		wall = wall.Add(step)
++		got := h.videoTS.update(rawAt(startRaw, 40*time.Millisecond), wall)
++		if got < prev {
++			t.Fatalf("timeline went backwards: %d us after %d us", got, prev)
++		}
++		prev = got
++	}
++}
++
++func TestTracksShareAnOrigin(t *testing.T) {
++	h := newHandlerForTest()
++	wall := time.Unix(1700000000, 0)
++
++	// Video starts first and runs for 10 seconds before any audio shows up —
++	// the situation that used to leave audio 10s behind video for the life of
++	// the connection.
++	h.videoTS.update(694144, wall)
++	audioStart := wall.Add(10 * time.Second)
++	video := h.videoTS.update(rawAt(694144, 10*time.Second), audioStart)
++	audio := h.audioTS.update(52613, audioStart)
++
++	diff := int64(video) - int64(audio)
++	if diff < -1000 || diff > 1000 {
++		t.Fatalf("tracks started %d us apart, want them aligned within 1ms", diff)
++	}
++}
++
++func TestTracksStayAlignedWhileBothRun(t *testing.T) {
++	h := newHandlerForTest()
++	wall := time.Unix(1700000000, 0)
++
++	const videoRaw, audioRaw = 694144, 52613
++	h.videoTS.update(videoRaw, wall)
++	h.audioTS.update(audioRaw, wall)
++
++	// 60s of video at 20fps and audio at 16kHz/1024, plus a 2.5s audio stall
++	// partway through — the exact shape that produced the real-world drift.
++	var video, audio uint64
++	const videoFrame = 49971 * time.Microsecond
++	const audioFrame = 64 * time.Millisecond
++
++	elapsed := time.Duration(0)
++	for i := 1; i <= 1200; i++ {
++		elapsed = time.Duration(i) * videoFrame
++		video = h.videoTS.update(rawAt(videoRaw, elapsed), wall.Add(elapsed))
++	}
++
++	audioElapsed := time.Duration(0)
++	for i := 1; audioElapsed < elapsed; i++ {
++		audioElapsed = time.Duration(i) * audioFrame
++		if audioElapsed > 20*time.Second && audioElapsed <= 22500*time.Millisecond {
++			continue // the stall: no audio frames delivered at all
++		}
++		audio = h.audioTS.update(rawAt(audioRaw, audioElapsed), wall.Add(audioElapsed))
++	}
++
++	diff := int64(video) - int64(audio)
++	if diff < 0 {
++		diff = -diff
++	}
++	// Both tracks should land within one frame of each other.
++	if diff > int64(100*time.Millisecond/time.Microsecond) {
++		t.Fatalf("tracks drifted %d us apart over 60s with a stall, want < 100ms", diff)
++	}
++}
++
++// legacyTracker is the reconstruction this patch replaces, kept here so the
++// tests above are demonstrably testing something: each scenario must fail
++// against it and pass against tsTracker.
++type legacyTracker struct {
++	lastRawTS uint32
++	accumUS   uint64
++	firstTS   bool
++}
++
++func (t *legacyTracker) update(rawTS uint32) uint64 {
++	if !t.firstTS {
++		t.firstTS = true
++		t.lastRawTS = rawTS
++		return 0
++	}
++	var delta uint32
++	if rawTS >= t.lastRawTS {
++		delta = rawTS - t.lastRawTS
++	} else {
++		delta = (tsWrapPeriod - t.lastRawTS) + rawTS
++	}
++	t.accumUS += uint64(delta)
++	t.lastRawTS = rawTS
++	return t.accumUS
++}
++
++func TestLegacyLosesWholeSecondsInAGap(t *testing.T) {
++	var legacy legacyTracker
++	const startRaw = 500000
++	legacy.update(startRaw)
++
++	gap := 3200 * time.Millisecond
++	got := legacy.update(rawAt(startRaw, gap))
++
++	// 3.2s elapsed, but the counter can only express the 200ms remainder.
++	if got != uint64(200*time.Millisecond/time.Microsecond) {
++		t.Fatalf("expected the old code to report 200ms for a %v gap, got %d us", gap, got)
++	}
++	if got == uint64(gap/time.Microsecond) {
++		t.Fatal("old code unexpectedly handled the gap; the fix would be untested")
++	}
++}
++
++func TestLegacyLosesAnExactMultipleOfTheWrapEntirely(t *testing.T) {
++	var legacy legacyTracker
++	const startRaw = 694144
++	legacy.update(startRaw)
++
++	// Ten seconds is an exact multiple of the one-second wrap, so the counter
++	// comes back to the same value and the old code advances by nothing at all.
++	got := legacy.update(rawAt(startRaw, 10*time.Second))
++	if got != 0 {
++		t.Fatalf("expected the old code to see a 10s gap as zero, got %d us", got)
++	}
++}
++
++func TestLegacyStartsTracksAtUnrelatedOrigins(t *testing.T) {
++	var video, audio legacyTracker
++
++	// Kept under a second so this isolates the origin defect from the
++	// lost-whole-seconds one.
++	const startRaw = 100000
++	const lead = 600 * time.Millisecond
++
++	video.update(startRaw)
++	videoNow := video.update(rawAt(startRaw, lead))
++	// Audio's first frame arrives alongside that video frame, yet the old code
++	// zeroes it on its own first frame and nothing ever closes the gap.
++	audioNow := audio.update(52613)
++
++	if audioNow != 0 {
++		t.Fatalf("expected the old code to zero audio on its own first frame, got %d", audioNow)
++	}
++	if videoNow-audioNow != uint64(lead/time.Microsecond) {
++		t.Fatalf("expected a %v split between tracks, got %d us", lead, videoNow-audioNow)
++	}
++}
++
++func TestPatchedTracksAlignInTheSameScenario(t *testing.T) {
++	h := newHandlerForTest()
++	wall := time.Unix(1700000000, 0)
++	const startRaw = 100000
++	const lead = 600 * time.Millisecond
++
++	h.videoTS.update(startRaw, wall)
++	video := h.videoTS.update(rawAt(startRaw, lead), wall.Add(lead))
++	audio := h.audioTS.update(52613, wall.Add(lead))
++
++	if diff := int64(video) - int64(audio); diff < -1000 || diff > 1000 {
++		t.Fatalf("tracks %d us apart, want aligned within 1ms", diff)
++	}
++}

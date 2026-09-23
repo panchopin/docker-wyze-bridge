@@ -249,10 +249,21 @@ class TestHomeAssistantAddonPackaging(unittest.TestCase):
         self.assertIn("  GO2RTC_LAN_IP_OVERRIDES: str?", config_text)
         self.assertIn("GO2RTC_LAN_IP_OVERRIDES:", translation_text)
 
-    def test_prod_addon_downloads_go2rtc_binary(self):
+    def test_prod_addon_builds_patched_go2rtc(self):
+        """The add-on must build go2rtc from source, not pull the release.
+
+        The upstream binary does not carry the TUTK timestamp fix, without
+        which recordings silently lose audio (app/patches/go2rtc/README.md).
+        """
         dockerfile_text = (ADDON_DIR / "Dockerfile").read_text()
-        self.assertIn("go2rtc_linux_${GO2RTC_ARCH}", dockerfile_text)
-        self.assertIn("usr/local/bin/go2rtc", dockerfile_text)
+        self.assertIn("FROM golang:1.24 AS go2rtc_builder", dockerfile_text)
+        self.assertIn("COPY /app/patches/go2rtc/ /patches/", dockerfile_text)
+        self.assertIn("git apply", dockerfile_text)
+        self.assertIn(
+            "COPY --from=go2rtc_builder /out/go2rtc /build/usr/local/bin/go2rtc",
+            dockerfile_text,
+        )
+        self.assertNotIn("go2rtc/releases/download", dockerfile_text)
 
     def test_go2rtc_sidecar_disables_default_webrtc_listener(self):
         helper_files = [
@@ -453,7 +464,7 @@ class TestHomeAssistantAddonPackaging(unittest.TestCase):
                         "go2rtc sidecar should not let a stale override replace a current private helper IP unless explicitly forced",
                     )
 
-    def test_root_dockerfiles_download_go2rtc_binary(self):
+    def test_root_dockerfiles_build_patched_go2rtc(self):
         dockerfiles = [
             ROOT / "docker" / "Dockerfile",
             ROOT / "docker" / "Dockerfile.multiarch",
@@ -462,8 +473,47 @@ class TestHomeAssistantAddonPackaging(unittest.TestCase):
         for dockerfile_path in dockerfiles:
             dockerfile_text = dockerfile_path.read_text()
             with self.subTest(dockerfile=str(dockerfile_path.relative_to(ROOT))):
-                self.assertIn("usr/local/bin/go2rtc", dockerfile_text)
-                self.assertIn("go2rtc_linux_", dockerfile_text)
+                self.assertIn("AS go2rtc_builder", dockerfile_text)
+                self.assertIn("COPY app/patches/go2rtc/ /patches/", dockerfile_text)
+                self.assertIn("git apply", dockerfile_text)
+                self.assertIn(
+                    "COPY --from=go2rtc_builder /out/go2rtc /build/usr/local/bin/go2rtc",
+                    dockerfile_text,
+                )
+                self.assertNotIn("go2rtc/releases/download", dockerfile_text)
+
+    def test_go2rtc_patches_are_mirrored_into_every_runtime_tree(self):
+        """The add-on Dockerfiles read the patches out of app/, so every
+        runtime tree needs its copy or the build silently ships stock go2rtc."""
+        patch_dirs = [
+            ROOT / "app" / "patches" / "go2rtc",
+            ROOT / "home_assistant" / "app" / "patches" / "go2rtc",
+            ROOT / ".ha_live_addon" / "app" / "patches" / "go2rtc",
+        ]
+        canonical = sorted(
+            p.name for p in patch_dirs[0].glob("*.patch")
+        )
+        self.assertTrue(canonical, "expected at least one go2rtc patch")
+        for patch_dir in patch_dirs:
+            with self.subTest(tree=str(patch_dir.relative_to(ROOT))):
+                self.assertTrue(patch_dir.is_dir())
+                self.assertEqual(
+                    sorted(p.name for p in patch_dir.glob("*.patch")), canonical
+                )
+
+    def test_go2rtc_patch_version_matches_the_pinned_checkout(self):
+        """A patch written against one tag will not apply to another."""
+        readme = (ROOT / "app" / "patches" / "go2rtc" / "README.md").read_text()
+        for dockerfile_path in [
+            ROOT / "docker" / "Dockerfile",
+            ROOT / "docker" / "Dockerfile.multiarch",
+            ROOT / "docker" / "Dockerfile.hwaccel",
+            ADDON_DIR / "Dockerfile",
+        ]:
+            dockerfile_text = dockerfile_path.read_text()
+            with self.subTest(dockerfile=str(dockerfile_path.relative_to(ROOT))):
+                self.assertIn("ARG GO2RTC_VERSION=1.9.14", dockerfile_text)
+        self.assertIn("v1.9.14", readme)
 
     def test_runtime_dockerfiles_include_curl_for_go2rtc_refresh(self):
         dockerfiles = [

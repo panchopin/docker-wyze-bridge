@@ -11,6 +11,22 @@ WORKDIR /build/whep_proxy
 RUN go mod download
 RUN go build -o /build/whep_proxy/whep_proxy
 
+# go2rtc is built from source so the TUTK timestamp fix in app/patches/go2rtc/
+# ends up in the binary; the upstream release does not carry it.
+FROM golang:1.24 AS go2rtc_builder
+ARG GO2RTC_VERSION=1.9.14
+WORKDIR /src
+RUN set -eux; \
+    git clone --depth 1 --branch "v${GO2RTC_VERSION}" https://github.com/AlexxIT/go2rtc.git /src
+COPY /app/patches/go2rtc/ /patches/
+RUN set -eux; \
+    for patch in /patches/*.patch; do \
+        echo "applying $(basename "${patch}")"; \
+        git apply --verbose "${patch}"; \
+    done
+RUN set -eux; \
+    CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/go2rtc .
+
 FROM base AS builder
 ARG BUILD_DATE=
 
@@ -53,16 +69,15 @@ RUN set -eux; \
     tar tzf mediamtx.tar.gz || (echo "Invalid mediamtx tarball for ${MTX_ARCH}" && exit 1); \
     tar xzf mediamtx.tar.gz -C app; \
     rm mediamtx.tar.gz; \
-    GO2RTC_ARCH=$([ "$(uname -m)" = "aarch64" ] && echo "arm64" || [ "$(uname -m)" = "armv7l" ] && echo "arm" || echo "amd64"); \
     mkdir -p usr/local/bin; \
-    curl -fsSL "https://github.com/AlexxIT/go2rtc/releases/download/v1.9.14/go2rtc_linux_${GO2RTC_ARCH}" -o usr/local/bin/go2rtc && echo "go2rtc downloaded OK"; \
-    chmod +x usr/local/bin/go2rtc; \
     cp app/lib/lib.${TARGETARCH} usr/local/lib/libIOTCAPIs_ALL.so; \
-    rm -rf app/*.txt app/lib/; \
+    rm -rf app/*.txt app/lib/ app/patches/; \
     if [ -z "${BUILD_DATE}" ]; \
         then echo BUILD_DATE=$(date) > .build_date; \
         else echo BUILD_DATE=${BUILD_DATE} > .build_date; \
     fi;
+
+COPY --from=go2rtc_builder /out/go2rtc /build/usr/local/bin/go2rtc
 
 FROM base
 ARG BUILD
