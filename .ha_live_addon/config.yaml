@@ -99,6 +99,10 @@ schema:
   RECORD_LENGTH: str?
   RECORD_PATH: str?
   RECORD_FILE_NAME: str?
+  AV_WATCHDOG: bool?
+  AV_WATCHDOG_INTERVAL: int?
+  AV_WATCHDOG_THRESHOLD: float?
+  AV_WATCHDOG_COOLDOWN: int?
   MQTT: bool?
   MQTT_HOST: str?
   MQTT_AUTH: str?

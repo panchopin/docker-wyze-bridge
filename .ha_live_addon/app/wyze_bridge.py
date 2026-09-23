@@ -7,15 +7,21 @@ from threading import Thread
 
 from wyzebridge.build_config import BUILD_STR, VERSION
 from wyzebridge.config import (
+    AV_WATCHDOG,
+    AV_WATCHDOG_COOLDOWN,
+    AV_WATCHDOG_INTERVAL,
+    AV_WATCHDOG_THRESHOLD,
     BRIDGE_IP,
     HASS_TOKEN,
     IMG_PATH,
     LLHLS,
     ON_DEMAND,
+    RECORD_LENGTH,
     STREAM_AUTH,
     TOKEN_PATH,
 )
 from wyzebridge.auth import WbAuth
+from wyzebridge.av_watchdog import AvSyncWatchdog, parse_duration
 from wyzebridge.bridge_utils import env_bool, env_cam, is_livestream, migrate_path
 from wyzebridge.camera_settings import get_camera_setting, update_camera_settings
 from wyzebridge.bridge_diagnostics import collect_bridge_diagnostics
@@ -38,7 +44,7 @@ if HASS_TOKEN:
 
 
 class WyzeBridge(Thread):
-    __slots__ = "api", "streams", "mtx", "main_pid"
+    __slots__ = "api", "streams", "mtx", "main_pid", "av_watchdog"
 
     def __init__(self) -> None:
         Thread.__init__(self)
@@ -51,6 +57,7 @@ class WyzeBridge(Thread):
         self.api: WyzeApi = WyzeApi()
         self.streams: StreamManager = StreamManager(self.api)
         self.mtx: MtxServer = MtxServer()
+        self.av_watchdog: AvSyncWatchdog | None = None
         self.mtx.setup_webrtc(BRIDGE_IP)
         if LLHLS:
             self.mtx.setup_llhls(TOKEN_PATH, bool(HASS_TOKEN))
@@ -69,7 +76,11 @@ class WyzeBridge(Thread):
 
     def health_details(self, stream_name: str | None = None):
         stream_info = self.streams.get_info(stream_name) if stream_name else None
-        return self.health() | collect_bridge_diagnostics(stream_name, stream_info)
+        details = self.health() | collect_bridge_diagnostics(stream_name, stream_info)
+        details["av_watchdog"] = (
+            self.av_watchdog.status() if self.av_watchdog else {"enabled": False}
+        )
+        return details
 
     def run(self, fresh_data: bool = False) -> None:
         self._initialize(fresh_data)
@@ -97,14 +108,36 @@ class WyzeBridge(Thread):
             logger.debug(f"[BRIDGE] MTX config:\n{self.mtx.dump_config()}")
 
         self.mtx.start()
+        self._start_av_watchdog()
         self.streams.monitor_streams(self.mtx.health_check)
 
+    def _start_av_watchdog(self) -> None:
+        if not AV_WATCHDOG:
+            logger.info("[AV] Audio-loss watchdog disabled (AV_WATCHDOG=false)")
+            return
+        self.av_watchdog = AvSyncWatchdog(
+            watched_paths=self.mtx.watched_record_paths,
+            reset_path=self.mtx.reset_path,
+            segment_seconds=parse_duration(RECORD_LENGTH, 60.0),
+            threshold=AV_WATCHDOG_THRESHOLD,
+            interval=AV_WATCHDOG_INTERVAL,
+            cooldown=AV_WATCHDOG_COOLDOWN,
+        )
+        self.av_watchdog.start()
+
+    def _stop_av_watchdog(self) -> None:
+        if self.av_watchdog:
+            self.av_watchdog.stop()
+            self.av_watchdog = None
+
     def restart(self, fresh_data: bool = False) -> None:
+        self._stop_av_watchdog()
         self.mtx.stop()
         self.streams.stop_all()
         self._initialize(fresh_data)
 
     def refresh_cams(self) -> None:
+        self._stop_av_watchdog()
         self.mtx.stop()
         self.streams.stop_all()
         self.api.get_cameras(fresh_data=True)
@@ -150,11 +183,35 @@ class WyzeBridge(Thread):
                 self.mtx.add_path(stream.uri, not options.reconnect, stream.uses_kvs_source)
                 self.streams.add(stream)
 
+                # For cameras served by the go2rtc native sidecar (e.g. HL_CAM4),
+                # the MediaMTX path is left empty by add_path(), so MediaMTX has no
+                # source to record from. Wire it to pull from go2rtc's RTSP listener
+                # so RECORD: true (and any other MTX-attached feature) works the same
+                # way it does for KVS/TUTK cams.
+                if not stream.uses_kvs_source:
+                    native_info = native_stream_info(cam, substream=False)
+                    if native_info.get("native_selected") and native_info.get("native_rtsp_url"):
+                        self.mtx.add_source(stream.uri, native_info["native_rtsp_url"])
+
                 if env_cam("record", cam.name_uri):
                     self.mtx.record(stream.uri)
 
             if create_sub:
                 self.add_substream(user, self.api, cam, options)
+
+            # Native-only cams (e.g. HL_CAM4 served by the go2rtc sidecar) are
+            # skipped above: create_main/create_sub require feed.path ∈ {"main","sub"}
+            # but their feed.path is "native". They live entirely in go2rtc, so
+            # MediaMTX never sees them and RECORD: true silently does nothing.
+            # Wire a MediaMTX passthrough path here that pulls from go2rtc's RTSP
+            # listener so the recorder (and other MTX-attached features) work.
+            if not (create_main or create_sub):
+                native_info = native_stream_info(cam, substream=False)
+                if native_info.get("native_selected") and native_info.get("native_rtsp_url"):
+                    self.mtx.add_path(cam.name_uri, on_demand=False, is_kvs=False)
+                    self.mtx.add_source(cam.name_uri, native_info["native_rtsp_url"])
+                    if env_cam("record", cam.name_uri):
+                        self.mtx.record(cam.name_uri)
 
     def _camera_catalog_entry(self, cam: WyzeCamera) -> dict:
         config = self.camera_stream_config(cam)
@@ -461,6 +518,15 @@ class WyzeBridge(Thread):
             self.mtx.add_path(sub.uri, not options.reconnect, sub.uses_kvs_source)
             self.streams.add(sub)
 
+            # Same go2rtc-source wiring for substreams (e.g. HL_CAM4 brcam-sd),
+            # so SUB_RECORD: true actually produces recordings.
+            if not sub.uses_kvs_source:
+                native_info = native_stream_info(cam, substream=True)
+                if native_info.get("native_selected") and native_info.get("native_rtsp_url"):
+                    self.mtx.add_source(sub.uri, native_info["native_rtsp_url"])
+                    if record:
+                        self.mtx.record(sub.uri)
+
     def clean_up(self, *_):
         """Stop all streams and clean up before shutdown."""
         # Only run cleanup in the main process, not in child processes
@@ -470,6 +536,7 @@ class WyzeBridge(Thread):
             sys.exit(0)
         if self.streams:
             self.streams.stop_all()
+        self._stop_av_watchdog()
         self.mtx.stop()
         logger.info("👋 goodbye!")
         sys.exit(0)

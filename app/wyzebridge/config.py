@@ -73,6 +73,19 @@ MTX_READTIMEOUT: str = env_bool("MTX_READTIMEOUT", "30s", style="original")
 MTX_HLSVARIANT: str = env_bool("MTX_HLSVARIANT", "mpegts", style="original")
 MTX_WRITEQUEUESIZE: int = env_bool("MTX_WRITEQUEUESIZE", "2048", style="int")
 
+# Audio-loss watchdog.  go2rtc anchors each track's timeline independently and
+# cannot recover whole seconds lost in a gap, so the audio timeline slips behind
+# the video one and MediaMTX's fMP4 recorder discards every late audio sample.
+# See wyzebridge/av_watchdog.py.  Default on: it only acts on measured loss.
+AV_WATCHDOG: bool = bool(
+    env_bool("AV_WATCHDOG", style="bool") if getenv("AV_WATCHDOG") else True
+)
+AV_WATCHDOG_INTERVAL: int = max(env_bool("AV_WATCHDOG_INTERVAL", "120", style="int"), 30)
+AV_WATCHDOG_THRESHOLD: float = max(
+    env_bool("AV_WATCHDOG_THRESHOLD", "2.0", style="float"), 0.5
+)
+AV_WATCHDOG_COOLDOWN: int = max(env_bool("AV_WATCHDOG_COOLDOWN", "300", style="int"), 60)
+
 STUN_SERVER: str = env_bool("STUN_SERVER", "", style="original")
 
 FORCE_IOTC_DETAIL: bool = bool(env_bool("FORCE_IOTC_DETAIL", style="bool") or False)

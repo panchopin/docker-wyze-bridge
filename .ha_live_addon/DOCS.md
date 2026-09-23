@@ -121,3 +121,49 @@ http://homeassistant.local:59888/camera-nickname
 ```
 
 For local staging workflow details, use the gitignored maintainer docs in this workspace under `docs/maintainer/`.
+
+## Recorded-audio watchdog
+
+Cameras served by the native `go2rtc` sidecar reach MediaMTX over RTSP, and
+go2rtc rebuilds each track's timeline from the camera's frame timestamps. Those
+timestamps carry only the sub-second part of the camera's clock, and each track
+is anchored independently on its own first frame, so whole seconds lost in a gap
+are gone for good and the audio timeline slips behind the video timeline.
+
+MediaMTX then refuses every audio sample that lands before the current
+recording segment started — `sample of track N received too late, discarding` —
+because fragmented MP4 cannot express a negative start time. Once the slip
+reaches the segment length, recordings keep full video and **no audio at all**.
+
+The slip is fixed for the life of one RTSP connection and clears only when that
+connection is remade. The watchdog measures finished recordings and, when audio
+is missing, makes MediaMTX rebuild the affected path so its source reconnects.
+
+This add-on also ships a patched go2rtc that fixes the slip at its source, so
+the watchdog should rarely have anything to do. It stays enabled as a safety
+net, and because it is the only thing that reports the problem if it recurs.
+
+> Do not check for this with `ffprobe -show_entries stream=duration`. A
+> fragmented MP4 stores `mdhd.duration = 0`, so an audio track that received
+> nothing still reports the full movie duration and looks healthy. Count audio
+> packets instead (`ffprobe -select_streams a -count_packets`).
+
+Only paths that record from an `rtsp://` source are watched, which is exactly
+the set of native go2rtc cameras. On-demand KVS paths are left alone.
+
+Available options:
+
+- `AV_WATCHDOG` turns the watchdog on or off. Default `true`. It only acts on
+  loss it has actually measured in a finished recording.
+- `AV_WATCHDOG_INTERVAL` seconds between checks. Default `120`, minimum `30`.
+- `AV_WATCHDOG_THRESHOLD` seconds of missing audio in one segment before a path
+  is rebuilt. Default `2.0`, minimum `0.5`.
+- `AV_WATCHDOG_COOLDOWN` minimum seconds between two rebuilds of the same path.
+  Default `300`, minimum `60`. The wait doubles after each rebuild, up to 8×, so
+  a camera that cannot be repaired is not restarted in a loop.
+
+`GET /health/details` reports what the watchdog last measured per path under
+`av_watchdog`, including the rebuild count.
+
+Rebuilding a path interrupts that camera's recording and any live viewers for a
+few seconds. It does not touch the other cameras.

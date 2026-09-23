@@ -7,15 +7,21 @@ from threading import Thread
 
 from wyzebridge.build_config import BUILD_STR, VERSION
 from wyzebridge.config import (
+    AV_WATCHDOG,
+    AV_WATCHDOG_COOLDOWN,
+    AV_WATCHDOG_INTERVAL,
+    AV_WATCHDOG_THRESHOLD,
     BRIDGE_IP,
     HASS_TOKEN,
     IMG_PATH,
     LLHLS,
     ON_DEMAND,
+    RECORD_LENGTH,
     STREAM_AUTH,
     TOKEN_PATH,
 )
 from wyzebridge.auth import WbAuth
+from wyzebridge.av_watchdog import AvSyncWatchdog, parse_duration
 from wyzebridge.bridge_utils import env_bool, env_cam, is_livestream, migrate_path
 from wyzebridge.camera_settings import get_camera_setting, update_camera_settings
 from wyzebridge.bridge_diagnostics import collect_bridge_diagnostics
@@ -38,7 +44,7 @@ if HASS_TOKEN:
 
 
 class WyzeBridge(Thread):
-    __slots__ = "api", "streams", "mtx", "main_pid"
+    __slots__ = "api", "streams", "mtx", "main_pid", "av_watchdog"
 
     def __init__(self) -> None:
         Thread.__init__(self)
@@ -51,6 +57,7 @@ class WyzeBridge(Thread):
         self.api: WyzeApi = WyzeApi()
         self.streams: StreamManager = StreamManager(self.api)
         self.mtx: MtxServer = MtxServer()
+        self.av_watchdog: AvSyncWatchdog | None = None
         self.mtx.setup_webrtc(BRIDGE_IP)
         if LLHLS:
             self.mtx.setup_llhls(TOKEN_PATH, bool(HASS_TOKEN))
@@ -69,7 +76,11 @@ class WyzeBridge(Thread):
 
     def health_details(self, stream_name: str | None = None):
         stream_info = self.streams.get_info(stream_name) if stream_name else None
-        return self.health() | collect_bridge_diagnostics(stream_name, stream_info)
+        details = self.health() | collect_bridge_diagnostics(stream_name, stream_info)
+        details["av_watchdog"] = (
+            self.av_watchdog.status() if self.av_watchdog else {"enabled": False}
+        )
+        return details
 
     def run(self, fresh_data: bool = False) -> None:
         self._initialize(fresh_data)
@@ -97,14 +108,36 @@ class WyzeBridge(Thread):
             logger.debug(f"[BRIDGE] MTX config:\n{self.mtx.dump_config()}")
 
         self.mtx.start()
+        self._start_av_watchdog()
         self.streams.monitor_streams(self.mtx.health_check)
 
+    def _start_av_watchdog(self) -> None:
+        if not AV_WATCHDOG:
+            logger.info("[AV] Audio-loss watchdog disabled (AV_WATCHDOG=false)")
+            return
+        self.av_watchdog = AvSyncWatchdog(
+            watched_paths=self.mtx.watched_record_paths,
+            reset_path=self.mtx.reset_path,
+            segment_seconds=parse_duration(RECORD_LENGTH, 60.0),
+            threshold=AV_WATCHDOG_THRESHOLD,
+            interval=AV_WATCHDOG_INTERVAL,
+            cooldown=AV_WATCHDOG_COOLDOWN,
+        )
+        self.av_watchdog.start()
+
+    def _stop_av_watchdog(self) -> None:
+        if self.av_watchdog:
+            self.av_watchdog.stop()
+            self.av_watchdog = None
+
     def restart(self, fresh_data: bool = False) -> None:
+        self._stop_av_watchdog()
         self.mtx.stop()
         self.streams.stop_all()
         self._initialize(fresh_data)
 
     def refresh_cams(self) -> None:
+        self._stop_av_watchdog()
         self.mtx.stop()
         self.streams.stop_all()
         self.api.get_cameras(fresh_data=True)
@@ -503,6 +536,7 @@ class WyzeBridge(Thread):
             sys.exit(0)
         if self.streams:
             self.streams.stop_all()
+        self._stop_av_watchdog()
         self.mtx.stop()
         logger.info("👋 goodbye!")
         sys.exit(0)

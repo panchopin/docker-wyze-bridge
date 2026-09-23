@@ -1,10 +1,12 @@
 import contextlib
 from datetime import datetime
+from functools import lru_cache
 import math
 import os
 from pathlib import Path
 from signal import SIGTERM
 from subprocess import Popen
+import tempfile
 from typing import Optional
 
 import yaml
@@ -26,6 +28,10 @@ from wyzebridge.logging import logger
 MTX_CONFIG: str = "/app/mediamtx.yml" if Path("/app").exists() else ".runtime/mediamtx.yml"
 MTX_PATH: str = "%path"
 WHEP_PROXY_PORT: str = os.getenv("WHEP_PROXY_PORT", "8080")
+
+# Two interchangeable values for an inert path setting, used to force MediaMTX
+# to rebuild a path.  See MtxServer.reset_path().
+PATH_NUDGE: tuple[str, str] = ("3600s", "3601s")
 MTX_ADDRESS_KEYS: dict[str, str] = {
     "apiAddress": "MTX_APIADDRESS",
     "hlsAddress": "MTX_HLSADDRESS",
@@ -74,10 +80,32 @@ class MtxInterface:
             self.data = yaml.safe_load(f) or {}
 
     def save_config(self):
-        if self._modified:
-            logger.debug(f"[MTX] Writing config to {MTX_CONFIG=}")
-            with open(MTX_CONFIG, "w") as f:
+        if not self._modified:
+            return
+        logger.debug(f"[MTX] Writing config to {MTX_CONFIG=}")
+        # MediaMTX watches this file with fsnotify and reloads on every write
+        # (internal/confwatcher).  Truncating it in place lets the watcher fire
+        # on a half-written document, so swap it in atomically instead.
+        target = Path(MTX_CONFIG)
+        tmp_fd, tmp_name = tempfile.mkstemp(
+            dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(tmp_fd, "w") as f:
                 yaml.safe_dump(self.data, f, sort_keys=False)
+                f.flush()
+                os.fsync(f.fileno())
+            # mkstemp creates 0600; keep the mode the config file had before.
+            os.chmod(tmp_name, 0o644)
+            os.replace(tmp_name, target)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_name)
+            raise
+        # Callers often call save_config() explicitly and then leave the `with`
+        # block, which would write a second, identical copy and cost another
+        # reload signal.
+        self._modified = False
 
     def dump_to_yaml(self) -> str:
         return yaml.safe_dump(self.data, sort_keys=False)
@@ -235,6 +263,65 @@ class MtxServer:
             mtx.set(f"paths.{uri}.recordPath", record_path)
             mtx.save_config()
 
+    def watched_record_paths(self) -> dict[str, Path]:
+        """Recording paths fed by an RTSP source, with their archive root.
+
+        These are the go2rtc-native cameras: MediaMTX pulls them from the
+        sidecar's RTSP listener, which is the hop where the audio timeline
+        slips (see wyzebridge/av_watchdog.py).  On-demand paths are excluded —
+        they carry KVS sources and reset_path() is not safe for them.
+        """
+        with MtxInterface() as mtx:
+            paths = mtx.get("paths") or {}
+
+        watched: dict[str, Path] = {}
+        for uri, conf in paths.items():
+            if not isinstance(conf, dict) or not conf.get("record"):
+                continue
+            if conf.get("sourceOnDemand"):
+                continue
+            if not str(conf.get("source") or "").startswith("rtsp://"):
+                continue
+            watched[uri] = record_root(uri)
+        return watched
+
+    def reset_path(self, uri: str) -> bool:
+        """Make MediaMTX tear down and rebuild one path, reconnecting its source.
+
+        The audio/video offset lives in the gortsplib timestamp decoder that
+        MediaMTX creates per RTSP connection, so only a fresh connection clears
+        it; restarting the recorder alone does nothing.
+
+        MediaMTX reloads this config file on write and then, in
+        `pathManager.doReloadConf`, compares each path's old and new config.
+        `pathConfCanBeUpdated` copies the recording fields onto a clone of the
+        old config and checks equality — so a change to *recording* settings is
+        hot-applied in place, while a change to anything else closes the path
+        and immediately recreates it.  That close/recreate is the reconnection
+        we need.
+
+        `sourceOnDemandCloseAfter` is the lever: it is one of the non-recording
+        fields, and it is inert for these paths because they are not
+        `sourceOnDemand`.  Toggling it between two values is therefore a no-op
+        in behaviour and a rebuild in effect.
+        """
+        with MtxInterface() as mtx:
+            conf = mtx.get(f"paths.{uri}")
+            if not isinstance(conf, dict) or not conf.get("source"):
+                logger.warning(f"[MTX] Refusing to rebuild {uri}: no static source")
+                return False
+            if conf.get("sourceOnDemand"):
+                logger.warning(f"[MTX] Refusing to rebuild {uri}: path is on-demand")
+                return False
+            current = conf.get("sourceOnDemandCloseAfter")
+            mtx.set(
+                f"paths.{uri}.sourceOnDemandCloseAfter",
+                PATH_NUDGE[1] if current == PATH_NUDGE[0] else PATH_NUDGE[0],
+            )
+
+        logger.info(f"[MTX] Rebuilding path {uri} to reconnect its source")
+        return True
+
     def dump_config(self) -> str:
         with MtxInterface() as mtx:
             return mtx.dump_to_yaml()
@@ -321,6 +408,24 @@ def ensure_record_path() -> str:
         record_path += "_%s"
 
     return record_path
+
+
+@lru_cache(maxsize=None)
+def record_root(uri: str) -> Path:
+    """Directory that holds every recording for `uri`.
+
+    Cached: the watchdog asks for this on every cycle and
+    `ensure_record_path()` logs each time it is called.
+
+    The record pattern is time-templated, so everything from the first strftime
+    directive onwards varies per segment.  What precedes it is the fixed root
+    to search under.
+    """
+    pattern = ensure_record_path().format(cam_name=uri, CAM_NAME=uri.upper())
+    static = pattern.split("%", 1)[0]
+    if static.endswith("/"):
+        return Path(static)
+    return Path(static).parent
 
 
 def mtx_version() -> str:

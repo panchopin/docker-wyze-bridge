@@ -1,5 +1,45 @@
 # What's Changed
 
+## What's Changed in v4.3.12
+
+Recovers audio that the MediaMTX recorder was silently discarding on native
+`go2rtc` cameras.
+
+### Major Changes
+
+- Build go2rtc from source with a patch to its TUTK timestamp reconstruction,
+  instead of shipping the upstream release binary. Wyze cameras send only the
+  microsecond part of their clock (a counter that wraps every second, with the
+  seconds never transmitted), and go2rtc rebuilt elapsed time from those deltas
+  alone: any gap longer than a second was silently lost from that track's
+  timeline, and video and audio each zeroed on their own first frame so the two
+  tracks began at unrelated origins. That is what let the audio timeline slip
+  behind video and made the recorder discard audio. The patch gives every track
+  of a connection one shared origin and recovers the missing whole seconds from
+  frame arrival time, while still taking the exact sub-second spacing from the
+  camera. See `app/patches/go2rtc/README.md`; the patch ships with Go tests that
+  demonstrate each scenario failing against the old algorithm.
+- Add a recorded-audio watchdog. go2rtc rebuilds each track's timeline from
+  camera frame timestamps that carry only the sub-second part of the clock
+  (`tsWrapPeriod = 1000000`) and anchors each track independently on its own
+  first frame, so whole seconds lost in a gap are unrecoverable and the audio
+  timeline slips behind video. MediaMTX's fMP4 recorder then discards every
+  late audio sample (`sample of track N received too late, discarding`); once
+  the slip reaches the segment length, recordings keep full video and no audio.
+  The slip clears only when the RTSP source reconnects, so the watchdog
+  measures finished recordings and rebuilds the affected path when audio is
+  missing. Configurable through `AV_WATCHDOG`, `AV_WATCHDOG_INTERVAL`,
+  `AV_WATCHDOG_THRESHOLD` and `AV_WATCHDOG_COOLDOWN`; reported under
+  `av_watchdog` in `GET /health/details`.
+- Read per-track durations from fragmented MP4 directly instead of shelling out
+  to ffprobe, which is not in the image and — more importantly — reports the
+  full movie duration for an audio track that received no samples, hiding total
+  audio loss behind a healthy-looking number.
+- Write `mediamtx.yml` atomically. MediaMTX watches the file with fsnotify and
+  reloads on every write, so truncating it in place let the watcher observe a
+  half-written document. `save_config()` also no longer writes a second
+  identical copy when callers save explicitly inside a `with` block.
+
 ## What's Changed in v4.3.5
 
 Patch release focused on native SD alias durability for Home Assistant.
