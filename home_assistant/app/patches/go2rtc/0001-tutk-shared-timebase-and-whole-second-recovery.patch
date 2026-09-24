@@ -1,5 +1,5 @@
 diff --git a/pkg/tutk/frame.go b/pkg/tutk/frame.go
-index db5bf07..1e85cc2 100644
+index db5bf07..c33a75a 100644
 --- a/pkg/tutk/frame.go
 +++ b/pkg/tutk/frame.go
 @@ -5,6 +5,7 @@ import (
@@ -10,7 +10,7 @@ index db5bf07..1e85cc2 100644
  
  	"github.com/AlexxIT/go2rtc/pkg/aac"
  )
-@@ -199,8 +200,17 @@ type channelState struct {
+@@ -199,8 +200,24 @@ type channelState struct {
  	frameInfo  *FrameInfo // frame info (from end packet)
  	hasStarted bool       // received first packet of frame
  	lastPktIdx uint16     // last received packet index (for OOO detection)
@@ -18,6 +18,13 @@ index db5bf07..1e85cc2 100644
 +	// Packets that turned up before their turn, held until the gap ahead of
 +	// them fills in.
 +	pending map[uint16][]byte
++
++	// When this frame's first packet landed.  Holding packets means a frame
++	// can complete well after its data started arriving, and it is the start
++	// that says when the camera sent it.  Timing the frame by its last
++	// straggler instead makes the whole track look late, and the timestamp
++	// correction then pushes it ahead of its pair.
++	firstPktAt time.Time
  }
  
 +// Ceiling on held packets, so a frame missing a packet for good cannot grow
@@ -28,10 +35,11 @@ index db5bf07..1e85cc2 100644
  func (cs *channelState) reset() {
  	cs.frameNo = 0
  	cs.pktTotal = 0
-@@ -209,21 +219,111 @@ func (cs *channelState) reset() {
+@@ -209,21 +226,112 @@ func (cs *channelState) reset() {
  	cs.frameInfo = nil
  	cs.hasStarted = false
  	cs.lastPktIdx = 0
++	cs.firstPktAt = time.Time{}
 +	clear(cs.pending)
  }
  
@@ -142,7 +150,7 @@ index db5bf07..1e85cc2 100644
  	}
  
  	var delta uint32
-@@ -234,14 +334,89 @@ func (t *tsTracker) update(rawTS uint32) uint64 {
+@@ -234,14 +342,89 @@ func (t *tsTracker) update(rawTS uint32) uint64 {
  		delta = (tsWrapPeriod - t.lastRawTS) + rawTS
  	}
  
@@ -233,7 +241,7 @@ index db5bf07..1e85cc2 100644
  	videoTS  tsTracker
  	audioTS  tsTracker
  	output   chan *Packet
-@@ -251,11 +426,14 @@ type FrameHandler struct {
+@@ -251,11 +434,14 @@ type FrameHandler struct {
  }
  
  func NewFrameHandler(verbose bool) *FrameHandler {
@@ -249,7 +257,7 @@ index db5bf07..1e85cc2 100644
  }
  
  func (h *FrameHandler) Recv() <-chan *Packet {
-@@ -384,11 +562,41 @@ func (h *FrameHandler) handleVideo(channel byte, hdr *PacketHeader, payload []by
+@@ -384,11 +570,45 @@ func (h *FrameHandler) handleVideo(channel byte, hdr *PacketHeader, payload []by
  		cs.pktTotal = hdr.PktTotal
  	}
  
@@ -258,6 +266,10 @@ index db5bf07..1e85cc2 100644
 -		fmt.Printf("[OOO] ch=0x%02x #%d frameType=0x%02x pktTotal=%d expected pkt %d, got %d - reset\n",
 -			channel, hdr.FrameNo, hdr.FrameType, hdr.PktTotal, cs.waitSeq, hdr.PktIdx)
 -		cs.reset()
++	if cs.firstPktAt.IsZero() {
++		cs.firstPktAt = time.Now()
++	}
++
 +	// Packets do not always arrive in order on a busy wireless link, and a
 +	// keyframe can run to well over a hundred of them.  Throwing the frame
 +	// away on the first one out of sequence used to cost the whole picture:
@@ -296,7 +308,7 @@ index db5bf07..1e85cc2 100644
  		return
  	}
  
-@@ -405,6 +613,17 @@ func (h *FrameHandler) handleVideo(channel byte, hdr *PacketHeader, payload []by
+@@ -405,6 +625,17 @@ func (h *FrameHandler) handleVideo(channel byte, hdr *PacketHeader, payload []by
  		cs.frameInfo = fi
  	}
  
@@ -314,16 +326,16 @@ index db5bf07..1e85cc2 100644
  	// Check if frame is complete
  	if cs.waitSeq != cs.pktTotal || cs.frameInfo == nil {
  		return
-@@ -423,7 +642,7 @@ func (h *FrameHandler) handleVideo(channel byte, hdr *PacketHeader, payload []by
+@@ -423,7 +654,7 @@ func (h *FrameHandler) handleVideo(channel byte, hdr *PacketHeader, payload []by
  		return
  	}
  
 -	accumUS := h.videoTS.update(fi.Timestamp)
-+	accumUS := h.videoTS.update(fi.Timestamp, time.Now())
++	accumUS := h.videoTS.update(fi.Timestamp, cs.firstPktAt)
  	rtpTS := uint32(accumUS * 90000 / 1000000)
  
  	pkt := &Packet{
-@@ -471,7 +690,7 @@ func (h *FrameHandler) handleAudio(payload []byte, fi *FrameInfo) {
+@@ -471,7 +702,7 @@ func (h *FrameHandler) handleAudio(payload []byte, fi *FrameInfo) {
  		channels = fi.Channels()
  	}
  
@@ -334,10 +346,10 @@ index db5bf07..1e85cc2 100644
  	payloadCopy := make([]byte, len(payload))
 diff --git a/pkg/tutk/frame_reassembly_test.go b/pkg/tutk/frame_reassembly_test.go
 new file mode 100644
-index 0000000..0edd30c
+index 0000000..f97af8d
 --- /dev/null
 +++ b/pkg/tutk/frame_reassembly_test.go
-@@ -0,0 +1,243 @@
+@@ -0,0 +1,280 @@
 +package tutk
 +
 +import (
@@ -579,6 +591,43 @@ index 0000000..0edd30c
 +	pkt := collect(h)
 +	if pkt == nil || !bytes.Equal(pkt.Payload, whole) {
 +		t.Fatal("the replacement should recover the frame the old code dropped")
++	}
++}
++
++// TestAFrameIsTimedByItsFirstPacket guards the interaction that holding
++// packets introduced.  A frame whose last packet lags completes late, but it
++// was sent when its first packet was — timing it by the straggler makes the
++// whole video track look progressively later than it is, and the timestamp
++// correction then pushes it ahead of the audio, which the recorder answers by
++// discarding the audio.  Shipped as 4.3.16 and cost ~20s of audio per clip.
++func TestAFrameIsTimedByItsFirstPacket(t *testing.T) {
++	h := NewFrameHandler(false)
++	parts, whole := packetsFor(4)
++
++	feed(h, 5, 0, 4, parts[0], uint32(len(whole)))
++	start := h.channels[testChannel].firstPktAt
++	if start.IsZero() {
++		t.Fatal("the first packet's arrival was not recorded")
++	}
++
++	// The rest land later, the last one much later.
++	feed(h, 5, 2, 4, parts[2], uint32(len(whole)))
++	feed(h, 5, 1, 4, parts[1], uint32(len(whole)))
++
++	if got := h.channels[testChannel].firstPktAt; !got.Equal(start) {
++		t.Fatalf("arrival was moved to a later packet: %v, want %v", got, start)
++	}
++
++	feed(h, 5, 3, 4, parts[3], uint32(len(whole)))
++	if collect(h) == nil {
++		t.Fatal("frame did not complete")
++	}
++
++	// And the next frame starts its own clock.
++	next, nextWhole := packetsFor(2)
++	feed(h, 6, 0, 2, next[0], uint32(len(nextWhole)))
++	if got := h.channels[testChannel].firstPktAt; got.Equal(start) || got.IsZero() {
++		t.Fatal("the following frame reused the previous frame's arrival")
 +	}
 +}
 diff --git a/pkg/tutk/frame_ts_sim_test.go b/pkg/tutk/frame_ts_sim_test.go

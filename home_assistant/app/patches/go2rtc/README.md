@@ -109,3 +109,10 @@ fills, capped so that a packet which never arrives cannot grow the hold without
 bound. A frame is still never emitted with a hole in it. The tests carry the
 previous behaviour alongside, so the frame it dropped and this one recovers is
 the same frame.
+
+A frame is timed by when its **first** packet arrived, not by when the last
+straggler completed it. Holding packets means a frame can finish well after its
+data started turning up, and timing it by the straggler makes the whole video
+track look progressively later than it is — the correction above then pushes it
+ahead of the audio, and the recorder answers by discarding the audio. That
+shipped as 4.3.16 and cost about 20s of audio per clip before it was caught.

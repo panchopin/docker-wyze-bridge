@@ -1,5 +1,19 @@
 # What's Changed
 
+## What's Changed in v4.3.17
+
+Fixes an interaction introduced by 4.3.16.
+
+### Major Changes
+
+- Time a video frame by when its **first** packet arrived rather than by when
+  the last straggler completed it. Holding out-of-order packets (4.3.16) means
+  a frame can finish well after its data started turning up; timing it by the
+  straggler made the whole video track look progressively later than it was,
+  the timestamp correction pushed it ahead of the audio, and the recorder
+  answered by discarding the audio. Measured on a live clip: 38s of video
+  against 18s of audio.
+
 ## What's Changed in v4.3.16
 
 Stops one out-of-order packet from costing a whole frame.
