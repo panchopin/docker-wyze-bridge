@@ -81,8 +81,11 @@ AV_WATCHDOG: bool = bool(
     env_bool("AV_WATCHDOG", style="bool") if getenv("AV_WATCHDOG") else True
 )
 AV_WATCHDOG_INTERVAL: int = max(env_bool("AV_WATCHDOG_INTERVAL", "120", style="int"), 30)
+# 1.0s: MediaMTX only discards a sample once its track is more than a second
+# behind the segment start, so a real loss cannot be smaller than this, and
+# healthy segments were measured landing within 0.12s of full length.
 AV_WATCHDOG_THRESHOLD: float = max(
-    env_bool("AV_WATCHDOG_THRESHOLD", "2.0", style="float"), 0.5
+    env_bool("AV_WATCHDOG_THRESHOLD", "1.0", style="float"), 0.5
 )
 AV_WATCHDOG_COOLDOWN: int = max(env_bool("AV_WATCHDOG_COOLDOWN", "300", style="int"), 60)
 

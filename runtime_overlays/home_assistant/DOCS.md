@@ -129,22 +129,33 @@ net, and because it is the only thing that reports the problem if it recurs.
 > nothing still reports the full movie duration and looks healthy. Count audio
 > packets instead (`ffprobe -select_streams a -count_packets`).
 
-Only paths that record from an `rtsp://` source are watched, which is exactly
-the set of native go2rtc cameras. On-demand KVS paths are left alone.
+Both camera routes are watched. The native go2rtc cameras arrive over `rtsp://`
+from the sidecar and the KVS cameras over `whep://` from the local proxy, and
+MediaMTX decodes timestamps for both with the same per-connection decoder, so
+either can end up with one track offset from the other. Which track suffers
+differs: on the native route it is audio, on the KVS route it has been video.
+
+A segment only counts as evidence when at least one of its tracks ran the full
+length — a recorder restart leaves a fragment where *both* tracks are short
+together, and nothing was discarded there. Audio that runs a little past the
+final video frame is normal too, since segments are cut on video.
 
 Available options:
 
 - `AV_WATCHDOG` turns the watchdog on or off. Default `true`. It only acts on
   loss it has actually measured in a finished recording.
 - `AV_WATCHDOG_INTERVAL` seconds between checks. Default `120`, minimum `30`.
-- `AV_WATCHDOG_THRESHOLD` seconds of missing audio in one segment before a path
-  is rebuilt. Default `2.0`, minimum `0.5`.
+- `AV_WATCHDOG_THRESHOLD` seconds missing from either track in one segment
+  before a path is rebuilt. Default `1.0`, minimum `0.5`. MediaMTX only starts
+  discarding once a track is more than a second behind the segment start, so a
+  real loss cannot be smaller than that, and healthy segments were measured
+  landing within 0.12s of full length.
 - `AV_WATCHDOG_COOLDOWN` minimum seconds between two rebuilds of the same path.
   Default `300`, minimum `60`. The wait doubles after each rebuild, up to 8×, so
   a camera that cannot be repaired is not restarted in a loop.
 
 `GET /health/details` reports what the watchdog last measured per path under
-`av_watchdog`, including the rebuild count.
+`av_watchdog` — which track came up short, by how much, and the rebuild count.
 
 Rebuilding a path interrupts that camera's recording and any live viewers for a
 few seconds. It does not touch the other cameras.

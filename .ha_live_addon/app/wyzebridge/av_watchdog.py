@@ -57,10 +57,14 @@ _COMPLETION_GRACE = 15.0
 # camera must not be restarted on a loop.
 _STALE_AFTER_SEGMENTS = 4
 
-# A measured video duration outside this band means the segment itself is
-# malformed (we have seen churn produce a clip whose timestamps span 95s but
-# holds 29 frames).  Comparing tracks in that file tells us nothing.
-_VIDEO_PLAUSIBILITY = (0.5, 4.0)  # multipliers of the configured segment length
+# A segment only counts if at least one track ran the full length, which is
+# the proof that the segment itself was not cut short.  Recorder restarts leave
+# fragments where *both* tracks are short together — nothing was discarded
+# there, the segment just ended early, and measuring shortfall against the
+# configured length would read those as heavy loss.  The upper bound catches
+# malformed clips (churn once produced one whose timestamps span 95s around 29
+# frames).
+_SEGMENT_PLAUSIBILITY = (0.95, 4.0)  # multipliers of the configured segment length
 
 # Directory levels to descend when hunting for the newest segment.  The record
 # path is time-templated (…/%Y-%m/%d/%H/…), so this bounds the walk instead of
@@ -71,12 +75,20 @@ _MAX_DEPTH = 6
 class PathState:
     """Per-path bookkeeping: what we last measured and last did about it."""
 
-    __slots__ = ("last_checked", "last_reset", "last_deficit", "resets", "backoff")
+    __slots__ = (
+        "last_checked",
+        "last_reset",
+        "last_shortfall",
+        "last_track",
+        "resets",
+        "backoff",
+    )
 
     def __init__(self) -> None:
         self.last_checked: float = 0.0
         self.last_reset: float = 0.0
-        self.last_deficit: Optional[float] = None
+        self.last_shortfall: Optional[float] = None
+        self.last_track: Optional[str] = None
         self.resets: int = 0
         self.backoff: int = 1
 
@@ -84,7 +96,8 @@ class PathState:
         return {
             "last_checked": self.last_checked or None,
             "last_reset": self.last_reset or None,
-            "last_audio_deficit_seconds": self.last_deficit,
+            "last_shortfall_seconds": self.last_shortfall,
+            "last_shortfall_track": self.last_track,
             "resets": self.resets,
             "backoff": self.backoff,
         }
@@ -218,10 +231,11 @@ class AvSyncWatchdog:
 
         for uri, root in self._watched_paths().items():
             state = self._state.setdefault(uri, PathState())
-            deficit = self._measure(uri, root, state, now)
+            track, deficit = self._measure(uri, root, state, now)
             results[uri] = deficit
             state.last_checked = now
-            state.last_deficit = deficit
+            state.last_shortfall = deficit
+            state.last_track = track
 
             if deficit is None or deficit <= self._threshold:
                 if deficit is not None:
@@ -233,9 +247,9 @@ class AvSyncWatchdog:
                 continue
 
             logger.warning(
-                f"[AV] {uri}: {deficit:.1f}s of audio missing from the last "
+                f"[AV] {uri}: {deficit:.1f}s of {track} missing from the last "
                 f"{self._segment_seconds:.0f}s segment - rebuilding the path to "
-                "resynchronise the RTSP source"
+                "resynchronise its source"
             )
             if self._reset_path(uri):
                 state.last_reset = now
@@ -253,19 +267,20 @@ class AvSyncWatchdog:
 
     def _measure(
         self, uri: str, root: Path, state: PathState, now: float
-    ) -> Optional[float]:
+    ) -> tuple[Optional[str], Optional[float]]:
+        """Which track came up short in the newest finished segment, and by how much."""
         segment = newest_finished_segment(root, now)
         if segment is None:
-            return None
+            return None, None
 
         try:
             mtime = segment.stat().st_mtime
         except OSError:
-            return None
+            return None, None
 
         # Never judge a repair by a file recorded before it happened.
         if state.last_reset and mtime < state.last_reset:
-            return None
+            return None, None
 
         stale_after = self._segment_seconds * _STALE_AFTER_SEGMENTS + self._interval
         if now - mtime > stale_after:
@@ -273,29 +288,43 @@ class AvSyncWatchdog:
                 f"[AV] {uri}: newest finished segment is "
                 f"{(now - mtime) / 60:.0f} min old, not recording - skipping"
             )
-            return None
+            return None, None
 
         measured = track_durations(segment)
-        if not measured.ok or measured.video is None:
-            return None
+        if not measured.ok:
+            return None, None
 
-        low, high = _VIDEO_PLAUSIBILITY
-        if not (
-            self._segment_seconds * low
-            <= measured.video
-            <= self._segment_seconds * high
-        ):
+        present = {
+            name: value
+            for name, value in (("video", measured.video), ("audio", measured.audio))
+            if value is not None
+        }
+        if not present:
+            return None, None
+
+        # Judge "did this segment run its course" by the longest track, not by
+        # video: when video is the track being discarded it is the short one,
+        # and using it as the yardstick would write the loss off as a fragment.
+        low, high = _SEGMENT_PLAUSIBILITY
+        longest = max(present.values())
+        if not (self._segment_seconds * low <= longest <= self._segment_seconds * high):
             logger.debug(
                 f"[AV] {uri}: ignoring {segment.name}, "
-                f"implausible video duration {measured.video:.1f}s"
+                f"longest track is {longest:.1f}s - not a whole segment"
             )
-            return None
+            return None, None
 
-        if measured.audio is None:
-            # The stream genuinely carries no audio track; nothing to compare.
-            return None
+        # Each track is expected to fill the segment.  Comparing the two
+        # against each other instead would miss the case where video is the
+        # one being dropped, and would also flag the audio that legitimately
+        # runs past the final video frame.
+        worst_track, worst = None, 0.0
+        for name, value in present.items():
+            short = self._segment_seconds - value
+            if short > worst:
+                worst_track, worst = name, short
 
-        return measured.audio_deficit
+        return worst_track, max(0.0, worst)
 
     # --- reporting ------------------------------------------------------
 

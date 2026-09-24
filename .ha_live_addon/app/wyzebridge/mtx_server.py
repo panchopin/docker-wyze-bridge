@@ -29,9 +29,10 @@ MTX_CONFIG: str = "/app/mediamtx.yml" if Path("/app").exists() else ".runtime/me
 MTX_PATH: str = "%path"
 WHEP_PROXY_PORT: str = os.getenv("WHEP_PROXY_PORT", "8080")
 
-# Two interchangeable values for an inert path setting, used to force MediaMTX
-# to rebuild a path.  See MtxServer.reset_path().
+# Interchangeable values for settings MediaMTX ignores on a given kind of path,
+# used to force it to rebuild that path.  See MtxServer.reset_path().
 PATH_NUDGE: tuple[str, str] = ("3600s", "3601s")
+PATH_NUDGE_TRANSPORT: tuple[str, str] = ("automatic", "tcp")
 MTX_ADDRESS_KEYS: dict[str, str] = {
     "apiAddress": "MTX_APIADDRESS",
     "hlsAddress": "MTX_HLSADDRESS",
@@ -264,12 +265,14 @@ class MtxServer:
             mtx.save_config()
 
     def watched_record_paths(self) -> dict[str, Path]:
-        """Recording paths fed by an RTSP source, with their archive root.
+        """Recording paths we can both measure and repair, with their archive root.
 
-        These are the go2rtc-native cameras: MediaMTX pulls them from the
-        sidecar's RTSP listener, which is the hop where the audio timeline
-        slips (see wyzebridge/av_watchdog.py).  On-demand paths are excluded —
-        they carry KVS sources and reset_path() is not safe for them.
+        Both camera routes are affected.  The go2rtc-native cameras arrive over
+        `rtsp://` from the sidecar, the KVS cameras over `whep://` from the
+        local proxy, and MediaMTX decodes timestamps for both with the same
+        per-connection decoder — so either can end up with one track offset
+        from the other.  A path is watched when it records from a static source
+        that reset_path() knows how to rebuild.
         """
         with MtxInterface() as mtx:
             paths = mtx.get("paths") or {}
@@ -278,9 +281,7 @@ class MtxServer:
         for uri, conf in paths.items():
             if not isinstance(conf, dict) or not conf.get("record"):
                 continue
-            if conf.get("sourceOnDemand"):
-                continue
-            if not str(conf.get("source") or "").startswith("rtsp://"):
+            if _nudge_for(conf) is None:
                 continue
             watched[uri] = record_root(uri)
         return watched
@@ -300,23 +301,28 @@ class MtxServer:
         and immediately recreates it.  That close/recreate is the reconnection
         we need.
 
-        `sourceOnDemandCloseAfter` is the lever: it is one of the non-recording
-        fields, and it is inert for these paths because they are not
-        `sourceOnDemand`.  Toggling it between two values is therefore a no-op
-        in behaviour and a rebuild in effect.
+        The lever has to be a setting MediaMTX ignores on that particular path,
+        so the rebuild is the only thing that actually changes — see
+        `_nudge_for` for which one applies where.
         """
         with MtxInterface() as mtx:
             conf = mtx.get(f"paths.{uri}")
-            if not isinstance(conf, dict) or not conf.get("source"):
-                logger.warning(f"[MTX] Refusing to rebuild {uri}: no static source")
+            if not isinstance(conf, dict):
+                logger.warning(f"[MTX] Refusing to rebuild {uri}: no such path")
                 return False
-            if conf.get("sourceOnDemand"):
-                logger.warning(f"[MTX] Refusing to rebuild {uri}: path is on-demand")
+
+            nudge = _nudge_for(conf)
+            if nudge is None:
+                logger.warning(
+                    f"[MTX] Refusing to rebuild {uri}: no setting is safe to nudge here"
+                )
                 return False
-            current = conf.get("sourceOnDemandCloseAfter")
+
+            field, values = nudge
+            current = conf.get(field)
             mtx.set(
-                f"paths.{uri}.sourceOnDemandCloseAfter",
-                PATH_NUDGE[1] if current == PATH_NUDGE[0] else PATH_NUDGE[0],
+                f"paths.{uri}.{field}",
+                values[1] if current == values[0] else values[0],
             )
 
         logger.info(f"[MTX] Rebuilding path {uri} to reconnect its source")
@@ -408,6 +414,30 @@ def ensure_record_path() -> str:
         record_path += "_%s"
 
     return record_path
+
+
+def _nudge_for(conf: dict) -> Optional[tuple[str, tuple[str, str]]]:
+    """Pick a setting MediaMTX ignores on this path, or None if there isn't one.
+
+    `rtspTransport` is read only by the RTSP static source
+    (`internal/staticsources/rtsp/source.go`), so on a `whep://` path it is
+    inert — which covers the on-demand KVS cameras.
+
+    `sourceOnDemandCloseAfter` is inert the other way round: it only means
+    something when `sourceOnDemand` is set, so it suits the always-on
+    `rtsp://` paths the go2rtc sidecar feeds.
+
+    Neither is in the recording-settings list that MediaMTX hot-applies in
+    place, so changing either one closes and recreates the path.
+    """
+    source = str(conf.get("source") or "")
+    if not source:
+        return None
+    if not source.startswith("rtsp://"):
+        return "rtspTransport", PATH_NUDGE_TRANSPORT
+    if not conf.get("sourceOnDemand"):
+        return "sourceOnDemandCloseAfter", PATH_NUDGE
+    return None
 
 
 @lru_cache(maxsize=None)

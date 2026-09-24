@@ -270,7 +270,7 @@ class TestAvSyncWatchdog(unittest.TestCase):
 
     def _watchdog(self, mtx, **kwargs):
         options = dict(
-            segment_seconds=60.0, threshold=2.0, interval=120.0, cooldown=300.0
+            segment_seconds=60.0, threshold=1.0, interval=120.0, cooldown=300.0
         )
         options.update(kwargs)
         return AvSyncWatchdog(
@@ -288,6 +288,50 @@ class TestAvSyncWatchdog(unittest.TestCase):
 
         self.assertAlmostEqual(deficits["main-bedroom"], 60.0, places=1)
         self.assertEqual(mtx.resets, ["main-bedroom"])
+
+    def test_video_loss_is_caught_too(self):
+        """On the KVS route it is video that gets discarded, not audio.  The
+        audio track then runs *longer*, so comparing the two against each
+        other would read as healthy."""
+        # 60s segment: ~1.7s of video missing, audio spilling past the end.
+        self._segment(video_samples=1166, audio_samples=964)
+        mtx = FakeMtx({"kitchen-cam": self.root})
+        watchdog = self._watchdog(mtx)
+
+        deficits = watchdog.check_once()
+
+        self.assertAlmostEqual(deficits["kitchen-cam"], 1.7, places=1)
+        self.assertEqual(mtx.resets, ["kitchen-cam"])
+        self.assertEqual(
+            watchdog.status()["paths"]["kitchen-cam"]["last_shortfall_track"], "video"
+        )
+
+    def test_audio_running_past_the_last_video_frame_is_not_loss(self):
+        """Segments are cut on video, so a little audio beyond the final video
+        frame is normal and must not trigger a rebuild."""
+        # video exactly 60s, audio 1.7s longer
+        self._segment(video_samples=1200, audio_samples=964)
+        mtx = FakeMtx({"kitchen-cam": self.root})
+        watchdog = self._watchdog(mtx)
+
+        deficits = watchdog.check_once()
+
+        self.assertEqual(deficits["kitchen-cam"], 0.0)
+        self.assertEqual(mtx.resets, [])
+
+    def test_a_whole_segment_is_judged_by_its_longest_track(self):
+        """Heavy video loss must not be written off as a fragment: if video is
+        the short track, using it as the yardstick hides exactly the case we
+        are looking for."""
+        # audio full length, video down to 15s
+        self._segment(video_samples=300, audio_samples=938)
+        mtx = FakeMtx({"kitchen-cam": self.root})
+        watchdog = self._watchdog(mtx)
+
+        deficits = watchdog.check_once()
+
+        self.assertAlmostEqual(deficits["kitchen-cam"], 45.0, places=0)
+        self.assertEqual(mtx.resets, ["kitchen-cam"])
 
     def test_healthy_recording_is_left_alone(self):
         self._segment(video_samples=1200, audio_samples=938)
@@ -460,17 +504,46 @@ class TestMtxServerReset(unittest.TestCase):
             self.assertIs(mtx.get("paths.main-bedroom.record"), True)
             self.assertEqual(mtx.get("paths.main-bedroom.source"), "rtsp://x/y")
 
-    def test_refuses_on_demand_paths(self):
+    def test_kvs_paths_use_a_lever_that_is_inert_for_them(self):
+        """A whep:// path never reads rtspTransport, so toggling it rebuilds
+        the path and changes nothing else.  sourceOnDemandCloseAfter would not
+        do here — these paths are on-demand, so it is live."""
         server, _ = self._server(
-            {"kvs": {"source": "whep://127.0.0.1:8080/whep/kvs", "sourceOnDemand": True}}
+            {
+                "kvs": {
+                    "source": "whep://127.0.0.1:8080/whep/kvs",
+                    "record": True,
+                    "sourceOnDemand": True,
+                }
+            }
         )
-        self.assertFalse(server.reset_path("kvs"))
+
+        self.assertTrue(server.reset_path("kvs"))
+        with self.mtx_server.MtxInterface() as mtx:
+            first = mtx.get("paths.kvs.rtspTransport")
+            self.assertIsNone(mtx.get("paths.kvs.sourceOnDemandCloseAfter"))
+        self.assertEqual(first, self.mtx_server.PATH_NUDGE_TRANSPORT[0])
+
+        self.assertTrue(server.reset_path("kvs"))
+        with self.mtx_server.MtxInterface() as mtx:
+            second = mtx.get("paths.kvs.rtspTransport")
+        self.assertEqual(second, self.mtx_server.PATH_NUDGE_TRANSPORT[1])
+
+    def test_refuses_on_demand_rtsp_paths(self):
+        """Neither lever is safe there: rtspTransport is live for an rtsp://
+        source, and sourceOnDemandCloseAfter is live for an on-demand path."""
+        server, _ = self._server(
+            {"odd": {"source": "rtsp://host/x", "record": True, "sourceOnDemand": True}}
+        )
+        self.assertFalse(server.reset_path("odd"))
 
     def test_refuses_paths_without_a_static_source(self):
         server, _ = self._server({"publisher-path": {}})
         self.assertFalse(server.reset_path("publisher-path"))
 
-    def test_watched_paths_selects_only_rtsp_recording_paths(self):
+    def test_watched_paths_cover_both_camera_routes(self):
+        """Both routes can end up with a track offset, so both are watched —
+        but only where a rebuild is actually possible."""
         server, _ = self._server(
             {
                 "native": {"source": "rtsp://127.0.0.1:19554/native", "record": True},
@@ -480,9 +553,15 @@ class TestMtxServerReset(unittest.TestCase):
                     "sourceOnDemand": True,
                 },
                 "not-recording": {"source": "rtsp://127.0.0.1:19554/x"},
+                "no-source": {"record": True},
+                "unrepairable": {
+                    "source": "rtsp://host/x",
+                    "record": True,
+                    "sourceOnDemand": True,
+                },
             }
         )
-        self.assertEqual(list(server.watched_record_paths()), ["native"])
+        self.assertEqual(sorted(server.watched_record_paths()), ["kvs", "native"])
 
     def test_config_is_written_atomically(self):
         """A half-written config would be picked up by MediaMTX's file watcher."""
