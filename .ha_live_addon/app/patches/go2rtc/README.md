@@ -35,6 +35,14 @@ Arrival time decides only *how many whole seconds* to add and where a track's
 timeline starts; the camera's counter still supplies the exact sub-second
 spacing, which is what A/V sync depends on.
 
+**A track joins the shared timeline by the camera's clock, not by when its
+frames turn up.** Both tracks are stamped from one clock inside the camera —
+measured on a real HL_CAM4 their sub-second readings sit within about 150ms of
+each other — so the signed distance between a joining frame and the most recent
+frame already placed gives their true separation. Anchoring on arrival instead
+carries whatever the difference in delivery latency happens to be, and that
+offset then lasts for the life of the connection.
+
 **The correction is measured against that shared origin, not against the
 previous frame.** The first version of this patch compared each frame with the
 one before it, and shipped as 4.3.12 without fixing anything: audio arrives in
@@ -46,6 +54,22 @@ loop on a fixed origin lets jitter average out instead of accumulating, and the
 correction only ever *adds* seconds, which keeps the timeline monotonic for
 free. Overshoot is self-limiting: once the timeline passes real time the drift
 drops below a second and nothing further is added.
+
+**And the shortfall is judged against how late that track normally runs, and
+only after it holds for several frames.** A stall in delivery looks exactly
+like a second genuinely lost on the frame it lands on; the two only separate
+afterwards, when delivery catches back up and a real loss would not have.
+4.3.13 acted immediately and against zero, so one hiccup added a second that
+was never given back — which is the ~1.09s residual the camera was measured
+sitting at, just past the one second where MediaMTX starts discarding. The test
+suite runs the 4.3.13 shape through a single 1.3s stall for comparison: it ends
+a full second ahead of the camera, this version lands exactly on it.
+
+Sub-second delivery lags are handled exactly; a lag of half a second or more is
+not, and cannot be. The camera sends only the microsecond part of its clock, so
+such a lag is indistinguishable from a frame that really was captured that much
+later — and MediaMTX stops accepting a track once it is a second behind the
+segment, so a genuine lag that large costs data whatever we do.
 
 `pkg/tutk/frame_ts_test.go` comes with the patch and includes the pre-patch
 algorithm, so each scenario is shown failing against the old code and passing

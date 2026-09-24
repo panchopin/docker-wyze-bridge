@@ -1,5 +1,5 @@
 diff --git a/pkg/tutk/frame.go b/pkg/tutk/frame.go
-index db5bf07..9864301 100644
+index db5bf07..b56a67c 100644
 --- a/pkg/tutk/frame.go
 +++ b/pkg/tutk/frame.go
 @@ -5,6 +5,7 @@ import (
@@ -10,10 +10,16 @@ index db5bf07..9864301 100644
  
  	"github.com/AlexxIT/go2rtc/pkg/aac"
  )
-@@ -213,17 +214,62 @@ func (cs *channelState) reset() {
+@@ -213,17 +214,106 @@ func (cs *channelState) reset() {
  
  const tsWrapPeriod uint32 = 1000000
  
++// How many frames in a row must show the same shortfall before it is treated
++// as time that was really lost rather than delivery running late.  Audio
++// arrives around 15 frames a second, so this is well under a second of delay
++// on acting, and comfortably longer than the burst that follows a stall.
++const correctionConfirmFrames = 8
++
 +// The camera stamps each frame with the microsecond part of its clock only:
 +// the field counts 0..999999 and wraps every second, and the seconds themselves
 +// are never transmitted.  Reconstructing elapsed time from those deltas alone
@@ -37,10 +43,13 @@ index db5bf07..9864301 100644
 +// samples that fall before the current segment's start, so a slipped audio
 +// timeline silently drops audio from recordings.
 +
-+// tsBase is the origin shared by every track of one connection.
++// tsBase is the origin shared by every track of one connection, plus a
++// running reference to the most recent frame placed on that timeline.
 +type tsBase struct {
-+	epoch time.Time
-+	set   bool
++	epoch     time.Time
++	lastAccum uint64 // where the most recent frame landed on the timeline
++	lastRaw   uint32 // and that frame's camera clock reading
++	set       bool
 +}
 +
  type tsTracker struct {
@@ -49,6 +58,18 @@ index db5bf07..9864301 100644
 +	lastWall  time.Time
  	accumUS   uint64
  	firstTS   bool
++
++	// Smallest gap yet seen between real time and this track's own timeline,
++	// i.e. how far behind delivery normally runs for this track.  Corrections
++	// are judged against it rather than against zero.
++	latency    int64
++	latencySet bool
++
++	// Consecutive frames whose shortfall has been a second or more.  A stall
++	// in delivery shows the same shortfall as a second genuinely lost, and
++	// only time tells them apart: delivery catches back up, a lost second
++	// never does.
++	behind int
  }
  
 -func (t *tsTracker) update(rawTS uint32) uint64 {
@@ -62,20 +83,43 @@ index db5bf07..9864301 100644
 +		if t.base == nil || !t.base.set {
 +			if t.base != nil {
 +				t.base.epoch = now
++				t.base.lastAccum = 0
++				t.base.lastRaw = rawTS
 +				t.base.set = true
 +			}
 +			t.accumUS = 0
-+		} else if since := now.Sub(t.base.epoch); since > 0 {
-+			// Another track already defined the origin; join its timeline
-+			// instead of starting a second one at zero.
-+			t.accumUS = uint64(since / time.Microsecond)
++			t.latency, t.latencySet = 0, true
++			return t.accumUS
 +		}
++
++		// Another track already defined the timeline, so join it by the camera
++		// clock rather than by arrival.  Both tracks are stamped from that one
++		// clock, so the signed distance between this frame's reading and the
++		// most recent frame already placed gives their true separation; the
++		// two are capturing the same moments, so the right reading of the
++		// wrapped difference is always the one nearest zero.
++		//
++		// Arrival time cannot do this job: it carries whatever the difference
++		// in delivery latency happens to be, and that offset then lasts for
++		// the life of the connection.
++		anchor := int64(t.base.lastAccum) + signedPhase(rawTS, t.base.lastRaw)
++		if anchor < 0 {
++			anchor = 0
++		}
++		t.accumUS = uint64(anchor)
++
++		// Whatever is left between real time and where the camera says this
++		// frame belongs is this track's delivery lag.  Seeding it here matters:
++		// picking it up from the first drift reading instead would mistake an
++		// opening gap for normal lateness and then never correct for it.
++		t.latency = int64(now.Sub(t.base.epoch)/time.Microsecond) - anchor
++		t.latencySet = true
 +
 +		return t.accumUS
  	}
  
  	var delta uint32
-@@ -234,14 +280,48 @@ func (t *tsTracker) update(rawTS uint32) uint64 {
+@@ -234,14 +324,89 @@ func (t *tsTracker) update(rawTS uint32) uint64 {
  		delta = (tsWrapPeriod - t.lastRawTS) + rawTS
  	}
  
@@ -108,24 +152,65 @@ index db5bf07..9864301 100644
 +			// pair by most of a second.  Overshoot is self-limiting anyway —
 +			// once the timeline passes real time the drift drops below a
 +			// second and no further seconds are added.
-+			if whole := drift / int64(tsWrapPeriod); whole > 0 {
-+				projected += uint64(whole) * uint64(tsWrapPeriod)
++			// Judge the drift against how far behind this track normally
++			// runs, not against zero.  A track whose frames always arrive a
++			// second or more late would otherwise have that second folded
++			// into its timeline permanently, splitting it from its pair —
++			// which is exactly the ~1.09s residual measured on the camera
++			// after the first two attempts at this fix.
++			if drift < t.latency {
++				t.latency = drift
++			}
++			if whole := (drift - t.latency) / int64(tsWrapPeriod); whole > 0 {
++				// Wait for it to hold.  A burst of frames arriving late after
++				// a stall looks identical to a lost second on the frame it
++				// lands on, and correcting there adds a second that is never
++				// given back — which is how a single delivery hiccup used to
++				// leave the tracks a second apart for good.
++				t.behind++
++				if t.behind >= correctionConfirmFrames {
++					projected += uint64(whole) * uint64(tsWrapPeriod)
++					t.behind = 0
++				}
++			} else {
++				t.behind = 0
 +			}
 +		}
 +	}
 +
 +	t.accumUS = projected
++
++	if t.base != nil && t.base.set {
++		// Keep the shared reference on the newest frame, so a track joining
++		// later anchors against something current.
++		t.base.lastAccum = t.accumUS
++		t.base.lastRaw = rawTS
++	}
  
  	return t.accumUS
  }
  
++// signedPhase reads the wrapped difference between two camera clock values as
++// the offset nearest zero, in microseconds.  The camera only sends the
++// sub-second part, so a raw difference of 900000 means -100ms, not +900ms.
++func signedPhase(a, b uint32) int64 {
++	diff := (int64(a) - int64(b)) % int64(tsWrapPeriod)
++	if diff < 0 {
++		diff += int64(tsWrapPeriod)
++	}
++	if diff > int64(tsWrapPeriod)/2 {
++		diff -= int64(tsWrapPeriod)
++	}
++	return diff
++}
++
  type FrameHandler struct {
  	channels map[byte]*channelState
 +	tsBase   tsBase
  	videoTS  tsTracker
  	audioTS  tsTracker
  	output   chan *Packet
-@@ -251,11 +331,14 @@ type FrameHandler struct {
+@@ -251,11 +416,14 @@ type FrameHandler struct {
  }
  
  func NewFrameHandler(verbose bool) *FrameHandler {
@@ -141,7 +226,7 @@ index db5bf07..9864301 100644
  }
  
  func (h *FrameHandler) Recv() <-chan *Packet {
-@@ -423,7 +506,7 @@ func (h *FrameHandler) handleVideo(channel byte, hdr *PacketHeader, payload []by
+@@ -423,7 +591,7 @@ func (h *FrameHandler) handleVideo(channel byte, hdr *PacketHeader, payload []by
  		return
  	}
  
@@ -150,7 +235,7 @@ index db5bf07..9864301 100644
  	rtpTS := uint32(accumUS * 90000 / 1000000)
  
  	pkt := &Packet{
-@@ -471,7 +554,7 @@ func (h *FrameHandler) handleAudio(payload []byte, fi *FrameInfo) {
+@@ -471,7 +639,7 @@ func (h *FrameHandler) handleAudio(payload []byte, fi *FrameInfo) {
  		channels = fi.Channels()
  	}
  
@@ -161,10 +246,10 @@ index db5bf07..9864301 100644
  	payloadCopy := make([]byte, len(payload))
 diff --git a/pkg/tutk/frame_ts_sim_test.go b/pkg/tutk/frame_ts_sim_test.go
 new file mode 100644
-index 0000000..9e2db18
+index 0000000..8c7678a
 --- /dev/null
 +++ b/pkg/tutk/frame_ts_sim_test.go
-@@ -0,0 +1,281 @@
+@@ -0,0 +1,422 @@
 +package tutk
 +
 +import (
@@ -246,7 +331,7 @@ index 0000000..9e2db18
 +// Both tracks must be generated over the same span of camera time, not the
 +// same number of frames: audio frames are 64ms and video frames 50ms, so
 +// equal counts would end tens of seconds apart and look exactly like drift.
-+func buildStream(deltas []uint32, startRaw uint32, span time.Duration, audio bool, r *rng, burstEvery int) []arrival {
++func buildStream(deltas []uint32, startRaw uint32, span time.Duration, audio bool, r *rng, burstEvery int, latency time.Duration) []arrival {
 +	out := []arrival{}
 +	var cameraUS uint64
 +	raw := startRaw
@@ -279,6 +364,7 @@ index 0000000..9e2db18
 +				held = 0
 +			}
 +		}
++		when += latency                                      // this track's delivery lag
 +		when += time.Duration(r.next(25)) * time.Millisecond // ordinary jitter
 +
 +		out = append(out, arrival{raw: raw, when: when, audio: audio})
@@ -314,8 +400,8 @@ index 0000000..9e2db18
 +	const span = 10 * time.Minute
 +
 +	r := &rng{s: 42}
-+	video := buildStream(realVideoDeltas, 694144, span, false, r, 0)
-+	audio := buildStream(realAudioDeltas, 52613, span, true, r, audioBurstEvery)
++	video := buildStream(realVideoDeltas, cameraBase, span, false, r, 0, 0)
++	audio := buildStream(realAudioDeltas, cameraBase, span, true, r, audioBurstEvery, 0)
 +	stream := merge(video, audio)
 +
 +	epoch := time.Unix(1700000000, 0)
@@ -382,8 +468,8 @@ index 0000000..9e2db18
 +func TestOpenLoopDriftsUnderTheSameDelivery(t *testing.T) {
 +	const span = 10 * time.Minute
 +	r := &rng{s: 42}
-+	video := buildStream(realVideoDeltas, 694144, span, false, r, 0)
-+	audio := buildStream(realAudioDeltas, 52613, span, true, r, audioBurstEvery)
++	video := buildStream(realVideoDeltas, cameraBase, span, false, r, 0, 0)
++	audio := buildStream(realAudioDeltas, cameraBase, span, true, r, audioBurstEvery, 0)
 +	stream := merge(video, audio)
 +
 +	epoch := time.Unix(1700000000, 0)
@@ -414,12 +500,21 @@ index 0000000..9e2db18
 +	const startRaw = 500000
 +	h.videoTS.update(startRaw, epoch)
 +
-+	// The camera really did stop for 3.2s, and says so in its own clock.
-+	gap := 3200 * time.Millisecond
-+	got := h.videoTS.update(rawAt(startRaw, gap), epoch.Add(gap))
++	// The camera really did stop for 3.2s, and says so in its own clock.  The
++	// correction waits for the shortfall to hold, so play out the frames that
++	// follow and check it lands within that window.
++	elapsed := 3200 * time.Millisecond
++	var got uint64
++	for i := 0; i < 2*correctionConfirmFrames; i++ {
++		got = h.videoTS.update(rawAt(startRaw, elapsed), epoch.Add(elapsed))
++		if got >= uint64(3200*time.Millisecond/time.Microsecond) {
++			break
++		}
++		elapsed += 50 * time.Millisecond
++	}
 +
-+	if want := uint64(gap / time.Microsecond); got != want {
-+		t.Fatalf("after a %v gap the timeline advanced %d us, want %d us", gap, got, want)
++	if want := uint64(elapsed / time.Microsecond); got != want {
++		t.Fatalf("the timeline reached %d us after the gap, want %d us", got, want)
 +	}
 +}
 +
@@ -446,12 +541,143 @@ index 0000000..9e2db18
 +		prev = got
 +	}
 +}
++
++// TestTracksSurviveDifferentDeliveryLatencies is the residual this third pass
++// exists for.  Audio reaching us consistently later than video must not shift
++// its timeline: the camera stamped both tracks from one clock, and that is
++// what decides where they belong.
++//
++// Anchoring on arrival, or measuring drift against zero instead of against a
++// track's own lateness, both bake the lag in permanently.  On the real camera
++// that parked the tracks 1.09s apart — just past the one second at which
++// MediaMTX begins discarding, so it cost audio every minute.
++func TestTracksSurviveDifferentDeliveryLatencies(t *testing.T) {
++	const span = 10 * time.Minute
++
++	// Sub-second lags only, and that bound is inherent rather than a chosen
++	// one: the camera sends just the microsecond part of its clock, so a lag
++	// of half a second or more is indistinguishable from a frame that really
++	// was captured that much later.  Nothing downstream can tell them apart
++	// either — MediaMTX stops accepting a track once it is a second behind the
++	// segment, so a genuine lag that large costs data whatever we do.
++	for _, lag := range []time.Duration{
++		50 * time.Millisecond,
++		200 * time.Millisecond,
++		450 * time.Millisecond,
++	} {
++		t.Run(lag.String(), func(t *testing.T) {
++			r := &rng{s: 7}
++			video := buildStream(realVideoDeltas, cameraBase, span, false, r, 0, 0)
++			audio := buildStream(realAudioDeltas, cameraBase, span, true, r, audioBurstEvery, lag)
++			stream := merge(video, audio)
++
++			epoch := time.Unix(1700000000, 0)
++			h := NewFrameHandler(false)
++
++			var lastVideo, lastAudio uint64
++			for _, f := range stream {
++				now := epoch.Add(f.when)
++				if f.audio {
++					lastAudio = h.audioTS.update(f.raw, now)
++				} else {
++					lastVideo = h.videoTS.update(f.raw, now)
++				}
++			}
++
++			split := int64(lastVideo) - int64(lastAudio)
++			if split < 0 {
++				split = -split
++			}
++			t.Logf("audio %v late: tracks ended %.3fs apart", lag, float64(split)/1e6)
++			if split > int64(300*time.Millisecond/time.Microsecond) {
++				t.Fatalf("a %v delivery lag split the tracks by %.3fs, want under 0.3s",
++					lag, float64(split)/1e6)
++			}
++		})
++	}
++}
++
++// driftVsZeroTracker is the 4.3.13 shape: origin shared, but the shortfall
++// judged against zero and acted on the first frame that shows it.  Kept so the
++// test below can show what that costs.
++type driftVsZeroTracker struct {
++	epoch     time.Time
++	lastRawTS uint32
++	accumUS   uint64
++	firstTS   bool
++}
++
++func (t *driftVsZeroTracker) update(rawTS uint32, now time.Time) uint64 {
++	if !t.firstTS {
++		t.firstTS, t.lastRawTS, t.epoch = true, rawTS, now
++		return 0
++	}
++	var delta uint32
++	if rawTS >= t.lastRawTS {
++		delta = rawTS - t.lastRawTS
++	} else {
++		delta = (tsWrapPeriod - t.lastRawTS) + rawTS
++	}
++	t.lastRawTS = rawTS
++	projected := t.accumUS + uint64(delta)
++	elapsed := int64(now.Sub(t.epoch) / time.Microsecond)
++	if whole := (elapsed - int64(projected)) / int64(tsWrapPeriod); whole > 0 {
++		projected += uint64(whole) * uint64(tsWrapPeriod)
++	}
++	t.accumUS = projected
++	return t.accumUS
++}
++
++// TestADeliveryStallDoesNotCostASecond is why this third pass exists.  A stall
++// longer than a second looks exactly like a second genuinely lost on the frame
++// it lands on; the difference only shows afterwards, when delivery catches
++// back up and a real loss would not have.  Acting immediately adds a second
++// that is never given back, and the track stays there — the ~1.09s the camera
++// was measured sitting at.
++func TestADeliveryStallDoesNotCostASecond(t *testing.T) {
++	const frame = 64 * time.Millisecond
++	const stallAt = 40
++	const stall = 1300 * time.Millisecond
++
++	epoch := time.Unix(1700000000, 0)
++	h := NewFrameHandler(false)
++	var old driftVsZeroTracker
++
++	// Video holds the shared origin steady while audio hiccups.
++	h.videoTS.update(cameraBase, epoch)
++
++	var fixed, previous uint64
++	camera := time.Duration(0)
++	for i := 0; i < 200; i++ {
++		camera = time.Duration(i) * frame
++		arrival := camera
++		// One stall, then delivery catches straight back up.
++		if i >= stallAt && i < stallAt+3 {
++			arrival += stall - time.Duration(i-stallAt)*(stall/3)
++		}
++		h.videoTS.update(rawAt(cameraBase, camera), epoch.Add(camera))
++		fixed = h.audioTS.update(rawAt(cameraBase, camera), epoch.Add(arrival))
++		previous = old.update(rawAt(cameraBase, camera), epoch.Add(arrival))
++	}
++
++	truth := int64(camera / time.Microsecond)
++	t.Logf("camera says %.3fs; 4.3.13 read %.3fs, this version %.3fs",
++		float64(truth)/1e6, float64(previous)/1e6, float64(fixed)/1e6)
++
++	if off := int64(previous) - truth; off < int64(time.Second/time.Microsecond) {
++		t.Fatalf("expected the 4.3.13 shape to gain a second from the stall, it gained %.3fs",
++			float64(off)/1e6)
++	}
++	if off := int64(fixed) - truth; off > int64(100*time.Millisecond/time.Microsecond) || off < 0 {
++		t.Fatalf("stall shifted the timeline by %.3fs, want it to stay put", float64(off)/1e6)
++	}
++}
 diff --git a/pkg/tutk/frame_ts_test.go b/pkg/tutk/frame_ts_test.go
 new file mode 100644
-index 0000000..ecfae64
+index 0000000..a9eb8bb
 --- /dev/null
 +++ b/pkg/tutk/frame_ts_test.go
-@@ -0,0 +1,251 @@
+@@ -0,0 +1,321 @@
 +package tutk
 +
 +import (
@@ -469,6 +695,12 @@ index 0000000..ecfae64
 +func newHandlerForTest() *FrameHandler {
 +	return NewFrameHandler(false)
 +}
++
++// Video and audio are stamped from the same clock inside the camera — measured
++// on a real HL_CAM4, their sub-second readings at neighbouring moments sit
++// within about 150ms of each other.  Tests must derive both tracks from one
++// base, or they are describing a camera that does not exist.
++const cameraBase = 694144
 +
 +func TestSteadyStreamKeepsSubSecondPrecision(t *testing.T) {
 +	h := newHandlerForTest()
@@ -507,13 +739,23 @@ index 0000000..ecfae64
 +	// A 3.2s stall: the raw counter wrapped three times, which the field
 +	// cannot express.  Unpatched, this advanced the timeline by 200ms and lost
 +	// three seconds for good.
++	//
++	// The correction waits for the shortfall to hold before acting, so feed
++	// the frames that follow and check it lands.
 +	gap := 3200 * time.Millisecond
-+	wall = wall.Add(gap)
-+	got := h.videoTS.update(rawAt(startRaw, gap), wall)
++	elapsed := gap
++	var got uint64
++	for i := 0; i < 2*correctionConfirmFrames; i++ {
++		got = h.videoTS.update(rawAt(startRaw, elapsed), wall.Add(elapsed))
++		if got >= uint64(gap/time.Microsecond) {
++			break
++		}
++		elapsed += 50 * time.Millisecond
++	}
 +
-+	want := uint64(gap / time.Microsecond)
++	want := uint64(elapsed / time.Microsecond)
 +	if got != want {
-+		t.Fatalf("after a %v gap the timeline advanced %d us, want %d us", gap, got, want)
++		t.Fatalf("after a %v gap the timeline reached %d us, want %d us", gap, got, want)
 +	}
 +}
 +
@@ -524,13 +766,20 @@ index 0000000..ecfae64
 +
 +	h.videoTS.update(startRaw, wall)
 +
-+	// The camera's clock says 2.5s elapsed; the frame arrives 180ms late.
-+	// Rounding to the nearest second must still yield exactly 2.5s.
-+	cameraGap := 2500 * time.Millisecond
-+	wall = wall.Add(cameraGap + 180*time.Millisecond)
-+	got := h.videoTS.update(rawAt(startRaw, cameraGap), wall)
++	// The camera's clock says 2.5s elapsed; frames arrive 180ms late
++	// throughout.  The recovered timeline must follow the camera, not the
++	// lateness.
++	elapsed := 2500 * time.Millisecond
++	var got uint64
++	for i := 0; i < 2*correctionConfirmFrames; i++ {
++		got = h.videoTS.update(rawAt(startRaw, elapsed), wall.Add(elapsed+180*time.Millisecond))
++		if got >= uint64(2500*time.Millisecond/time.Microsecond) {
++			break
++		}
++		elapsed += 50 * time.Millisecond
++	}
 +
-+	want := uint64(cameraGap / time.Microsecond)
++	want := uint64(elapsed / time.Microsecond)
 +	if got != want {
 +		t.Fatalf("jittered arrival produced %d us, want %d us", got, want)
 +	}
@@ -561,10 +810,10 @@ index 0000000..ecfae64
 +	// Video starts first and runs for 10 seconds before any audio shows up —
 +	// the situation that used to leave audio 10s behind video for the life of
 +	// the connection.
-+	h.videoTS.update(694144, wall)
++	h.videoTS.update(cameraBase, wall)
 +	audioStart := wall.Add(10 * time.Second)
-+	video := h.videoTS.update(rawAt(694144, 10*time.Second), audioStart)
-+	audio := h.audioTS.update(52613, audioStart)
++	video := h.videoTS.update(rawAt(cameraBase, 10*time.Second), audioStart)
++	audio := h.audioTS.update(rawAt(cameraBase, 10*time.Second), audioStart)
 +
 +	diff := int64(video) - int64(audio)
 +	if diff < -1000 || diff > 1000 {
@@ -576,7 +825,7 @@ index 0000000..ecfae64
 +	h := newHandlerForTest()
 +	wall := time.Unix(1700000000, 0)
 +
-+	const videoRaw, audioRaw = 694144, 52613
++	const videoRaw, audioRaw = cameraBase, cameraBase
 +	h.videoTS.update(videoRaw, wall)
 +	h.audioTS.update(audioRaw, wall)
 +
@@ -697,9 +946,56 @@ index 0000000..ecfae64
 +
 +	h.videoTS.update(startRaw, wall)
 +	video := h.videoTS.update(rawAt(startRaw, lead), wall.Add(lead))
-+	audio := h.audioTS.update(52613, wall.Add(lead))
++	audio := h.audioTS.update(rawAt(startRaw, lead), wall.Add(lead))
 +
 +	if diff := int64(video) - int64(audio); diff < -1000 || diff > 1000 {
 +		t.Fatalf("tracks %d us apart, want aligned within 1ms", diff)
++	}
++}
++
++// TestAnchorUsesTheCameraClockNotArrival pins the fix for the offset that
++// survived the first two attempts.  A track whose frames reach us late must
++// still be placed where the camera says it belongs: anchoring on arrival
++// instead leaves the tracks split by the difference in their delivery
++// latencies, for the life of the connection.  Measured on the real camera that
++// split was parking at 1.09s, just past the one second at which MediaMTX
++// starts discarding.
++func TestAnchorUsesTheCameraClockNotArrival(t *testing.T) {
++	h := newHandlerForTest()
++	wall := time.Unix(1700000000, 0)
++
++	// Video sets the origin.  Audio's first frame is stamped 120ms later by
++	// the camera, but only reaches us a second after that.
++	h.videoTS.update(cameraBase, wall)
++
++	const cameraOffset = 120 * time.Millisecond
++	const deliveryLag = 1000 * time.Millisecond
++	audio := h.audioTS.update(rawAt(cameraBase, cameraOffset), wall.Add(cameraOffset+deliveryLag))
++
++	if got, want := int64(audio), int64(cameraOffset/time.Microsecond); got != want {
++		t.Fatalf("audio anchored at %d us, want %d us (the camera's offset, not the arrival's)", got, want)
++	}
++}
++
++// TestAnchorPicksTheRightSecond: the camera only sends the sub-second part, so
++// arrival time still has to choose which second a late-joining track lands in.
++func TestAnchorPicksTheRightSecond(t *testing.T) {
++	h := newHandlerForTest()
++	wall := time.Unix(1700000000, 0)
++
++	// Video keeps running, so the reference a joining track anchors against is
++	// never more than a frame old — which is what lets a sub-second reading
++	// place the newcomer correctly however long it took to show up.
++	const cameraOffset = 3120 * time.Millisecond
++	for elapsed := time.Duration(0); elapsed <= cameraOffset; elapsed += 50 * time.Millisecond {
++		h.videoTS.update(rawAt(cameraBase, elapsed), wall.Add(elapsed))
++	}
++
++	// Audio joins 3.12s in; its own raw reading has wrapped three times and
++	// says only 120ms.
++	audio := h.audioTS.update(rawAt(cameraBase, cameraOffset), wall.Add(cameraOffset))
++
++	if got, want := int64(audio), int64(cameraOffset/time.Microsecond); got < want-60000 || got > want+60000 {
++		t.Fatalf("audio anchored at %d us, want about %d us", got, want)
 +	}
 +}

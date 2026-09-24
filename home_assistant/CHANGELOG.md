@@ -1,5 +1,31 @@
 # What's Changed
 
+## What's Changed in v4.3.15
+
+Closes the residual A/V offset that 4.3.13 left behind.
+
+### Major Changes
+
+- Anchor a joining track by the camera's clock instead of by when its frames
+  turn up. Both tracks are stamped from one clock inside the camera — measured
+  on a real HL_CAM4 their sub-second readings sit within about 150ms of each
+  other — so the signed distance between a joining frame and the most recent
+  frame already placed gives their true separation. Anchoring on arrival
+  carried whatever the difference in delivery latency happened to be, and that
+  offset then lasted for the life of the connection.
+- Judge the lost-seconds shortfall against how late a track normally runs, and
+  only act once it has held for several frames. A stall in delivery looks
+  exactly like a second genuinely lost on the frame it lands on; the two only
+  separate afterwards, when delivery catches back up and a real loss would not
+  have. 4.3.13 acted immediately and against zero, so a single hiccup added a
+  second that was never given back — the ~1.09s the camera was measured sitting
+  at, just past the one second where MediaMTX starts discarding.
+- The test suite now runs the 4.3.13 algorithm through the same 1.3s stall for
+  comparison: it ends a full second ahead of the camera, this version lands
+  exactly on it. Delivery lags up to half a second no longer move the tracks at
+  all; beyond that the camera's clock cannot resolve them, and neither can
+  anything downstream.
+
 ## What's Changed in v4.3.14
 
 Extends the recorded-loss watchdog to the KVS cameras, and to a short video
