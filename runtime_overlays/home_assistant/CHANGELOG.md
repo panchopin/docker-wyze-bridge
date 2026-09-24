@@ -1,5 +1,35 @@
 # What's Changed
 
+## What's Changed in v4.3.14
+
+Extends the recorded-loss watchdog to the KVS cameras, and to a short video
+track.
+
+### Major Changes
+
+- Watch both camera routes. The KVS cameras go wrong the same way the native
+  ones did, only mirrored: `kitchen-cam` ran for an hour at 32 discards a
+  minute with *video* as the track being dropped — `recording 2 tracks (G711,
+  H264)` makes video track 2 there — losing about 1.7s of picture from every
+  60s segment. The watchdog only looked at `rtsp://` paths and only measured
+  audio, so it saw none of it.
+- Rebuild on-demand `whep://` paths using `rtspTransport`, which is read only
+  by the RTSP static source and so is inert there; their
+  `sourceOnDemandCloseAfter` is live and cannot be used. Paths where neither
+  setting is safe are refused rather than nudged blindly.
+- Measure each track against the segment length rather than against the other
+  track. When video is the one being discarded the audio track simply runs
+  longer, so a track-versus-track comparison reads as healthy — and segments
+  are cut on video, so audio legitimately spills past the last video frame.
+- Only count a segment as evidence when at least one track ran the full length.
+  Recorder restarts leave fragments where both tracks are short together and
+  nothing was discarded. Checked against 17 real recordings covering healthy,
+  fragmented, spilling, partially lost and totally silent clips.
+- Lower the default threshold to 1.0s. MediaMTX only discards once a track is
+  over a second behind the segment start, so a real loss cannot be smaller, and
+  healthy segments were measured landing within 0.12s of full length. The old
+  2.0s default sat above kitchen-cam's 1.7s and would never have fired.
+
 ## What's Changed in v4.3.13
 
 Fixes the go2rtc timestamp patch shipped in 4.3.12, which did not work.
