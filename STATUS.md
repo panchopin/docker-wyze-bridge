@@ -1,7 +1,7 @@
 # Status
 
 Working notes for this fork: what it is, what has been fixed, what is still
-open. Last updated **2026-09-24**, at **v4.3.15**.
+open. Last updated **2026-09-24**, at **v4.3.17**.
 
 This is `panchopin/docker-wyze-bridge`, a fork of `thatdaveguy1/docker-wyze-bridge`,
 running as the Home Assistant add-on `63b085ed_docker_wyze_bridge_v4_panchopin`
@@ -68,21 +68,33 @@ report a recurrence.
 | 4.3.13 | root cause fixed, ~1.09s residual left |
 | 4.3.14 | watchdog widened to all five cameras and to either track |
 | 4.3.15 | residual closed — **0 discards**, worst audio deficit 0.06s |
+| 4.3.16 | frame reassembly tolerates reordering; broke A/V timing |
+| 4.3.17 | timing fixed — **7/7 clips complete**, video and audio matching |
 
 ## Open
 
-### Recordings are being fragmented (next up)
+### Two cameras have not sent a frame in hours (look here first)
 
-Clips are being cut into 6–30s pieces instead of running the full 60s. In one
-10-minute window: **19 `detected drift between recording duration and absolute
-time` and 14 `too many reordered frames`**, each of which restarts the recorder.
-Concentrated on the KVS cameras — `bedroom-cam` (18) and `kitchen-cam` (11),
-against 4 for `main-bedroom`.
+`kitchen-cam` was 12 hours stale and `living-room-cam` nearly three days, both
+still reporting `connected: true`. Judge a camera by `img_time`, never by
+`connected`. This matters for any measurement you take here: those two show
+zero recording errors purely because they carry no video, which is easy to
+misread as health.
 
-Not yet diagnosed. Worth keeping in mind that these may be the cameras'
-own connectivity rather than anything in the bridge: the KVS route has a
-separate, long-standing failure where a camera returns `503` in a loop for days
-(see `wyze-per-camera-404-outages` in the operator's notes).
+### KVS recordings are still fragmented
+
+`bedroom-cam` and `baby-cam` lose frames upstream, which leaves gaps in the
+H264 picture order count, which makes mediacommon's DTS extractor give up with
+`too many reordered frames` (its limit is 10; measured gaps run 11–22, i.e.
+0.5–1.1s of missing video, about four times a minute). Each one restarts the
+recorder. `bedroom-cam` was averaging 29.7s clips against an expected 60s, with
+roughly 12% of the video lost.
+
+Not fixed. It is upstream loss on the WebRTC path rather than anything the
+bridge does, and the same cameras have a long-standing failure where they
+return `503` in a loop for days. The native route's equivalent problem *was*
+fixed — see below — but that fix does not apply here: these cameras reach
+MediaMTX through `whep_proxy`, not through go2rtc.
 
 ### Smaller
 
@@ -92,6 +104,21 @@ separate, long-standing failure where a camera returns `503` in a loop for days
   (`app/wyzecam/api.py`, `app/frontend.py:415`).
 - Log volume: the fixes in `LOG_NOISE_FIX_PROPOSAL.md` (2026-09-01) are still
   unapplied.
+
+### Fixed along the way: the native route fragmenting
+
+go2rtc's frame reassembler wanted packets in strict order and threw the frame
+away on the first one out of place — and since its reset also cleared
+`frameNo`, every remaining packet of that frame was dropped in turn, one
+displaced packet costing the whole picture. With keyframes running to ~137
+packets and round-trips peaking past 500ms on this network, that was close to a
+coin toss per keyframe. Lost keyframes stalled the stream, MediaMTX's
+`readTimeout` expired, and recordings came out in pieces.
+
+Reassembly now holds out-of-order packets (4.3.16), and a frame is timed by its
+first packet rather than by the straggler that completed it (4.3.17) — timing
+it by the straggler made video look progressively late and pushed it ahead of
+audio, which cost ~20s of audio per clip until it was caught.
 
 ## Things that will mislead you
 
