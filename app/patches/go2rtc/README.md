@@ -80,3 +80,32 @@ off the real camera, with audio delivered in bursts, and carries the
 per-frame version alongside for comparison. Calibrated against the live
 measurement above: the per-frame version walks 12.0s apart over that run, the
 shared-origin version ends 0.03s apart with 99.4% of samples inside 0.5s.
+
+## The same patch also repairs frame reassembly
+
+`pkg/tutk/frame.go` reassembles each frame from the packets the camera sends —
+a 2K keyframe takes well over a hundred — and required them strictly in order.
+Any packet arriving out of sequence threw the whole frame away.
+
+Worse, the reset cleared `frameNo` along with everything else, so every packet
+still to come for that same frame then looked like the start of a new one, was
+reset again, and dropped in turn. One displaced packet cost the entire picture
+and printed a log line per packet on its way out. Seen live, sixteen
+consecutive `[OOO]` lines for a single frame:
+
+```
+[OOO] ch=0x05 #19294 pktTotal=137 expected pkt 0, got 117 - reset
+[OOO] ch=0x05 #19294 pktTotal=137 expected pkt 0, got 122 - reset
+...
+```
+
+Reordering is ordinary on a busy wireless link — measured on this network,
+round-trip times to the cameras average 30ms and peak past 500ms. Losing
+keyframes to it stalls the stream, which downstream shows up as MediaMTX's
+`readTimeout` expiring and reconnecting, and recordings cut into fragments.
+
+Packets arriving ahead of their turn are now held until the gap ahead of them
+fills, capped so that a packet which never arrives cannot grow the hold without
+bound. A frame is still never emitted with a hole in it. The tests carry the
+previous behaviour alongside, so the frame it dropped and this one recovers is
+the same frame.

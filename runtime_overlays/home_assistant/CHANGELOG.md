@@ -1,5 +1,25 @@
 # What's Changed
 
+## What's Changed in v4.3.16
+
+Stops one out-of-order packet from costing a whole frame.
+
+### Major Changes
+
+- Reassemble frames that arrive out of order instead of discarding them.
+  `pkg/tutk/frame.go` required packets strictly in sequence, and the reset it
+  did on the first one out of place also cleared `frameNo` — so every packet
+  still to come for that frame looked like a new one, reset again, and was
+  dropped in turn. One displaced packet cost the entire picture and printed a
+  log line per packet while it did; sixteen consecutive `[OOO]` lines for a
+  single frame were seen live. Reordering is ordinary on a busy wireless link
+  (round-trips to these cameras average 30ms and peak past 500ms), and losing
+  keyframes to it stalls the stream, which surfaces as MediaMTX's `readTimeout`
+  expiring and recordings cut into fragments.
+- Packets ahead of their turn are held until the gap fills, capped so a packet
+  that never arrives cannot grow the hold without bound. A frame is still never
+  emitted with a hole in it.
+
 ## What's Changed in v4.3.15
 
 Closes the residual A/V offset that 4.3.13 left behind.

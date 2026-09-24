@@ -1,5 +1,5 @@
 diff --git a/pkg/tutk/frame.go b/pkg/tutk/frame.go
-index db5bf07..b56a67c 100644
+index db5bf07..1e85cc2 100644
 --- a/pkg/tutk/frame.go
 +++ b/pkg/tutk/frame.go
 @@ -5,6 +5,7 @@ import (
@@ -10,7 +10,30 @@ index db5bf07..b56a67c 100644
  
  	"github.com/AlexxIT/go2rtc/pkg/aac"
  )
-@@ -213,17 +214,106 @@ func (cs *channelState) reset() {
+@@ -199,8 +200,17 @@ type channelState struct {
+ 	frameInfo  *FrameInfo // frame info (from end packet)
+ 	hasStarted bool       // received first packet of frame
+ 	lastPktIdx uint16     // last received packet index (for OOO detection)
++
++	// Packets that turned up before their turn, held until the gap ahead of
++	// them fills in.
++	pending map[uint16][]byte
+ }
+ 
++// Ceiling on held packets, so a frame missing a packet for good cannot grow
++// without bound.  A 2K keyframe runs to around 140 packets, so this leaves
++// plenty of room while capping the damage at a few hundred KB.
++const maxPendingPackets = 512
++
+ func (cs *channelState) reset() {
+ 	cs.frameNo = 0
+ 	cs.pktTotal = 0
+@@ -209,21 +219,111 @@ func (cs *channelState) reset() {
+ 	cs.frameInfo = nil
+ 	cs.hasStarted = false
+ 	cs.lastPktIdx = 0
++	clear(cs.pending)
+ }
  
  const tsWrapPeriod uint32 = 1000000
  
@@ -119,7 +142,7 @@ index db5bf07..b56a67c 100644
  	}
  
  	var delta uint32
-@@ -234,14 +324,89 @@ func (t *tsTracker) update(rawTS uint32) uint64 {
+@@ -234,14 +334,89 @@ func (t *tsTracker) update(rawTS uint32) uint64 {
  		delta = (tsWrapPeriod - t.lastRawTS) + rawTS
  	}
  
@@ -210,7 +233,7 @@ index db5bf07..b56a67c 100644
  	videoTS  tsTracker
  	audioTS  tsTracker
  	output   chan *Packet
-@@ -251,11 +416,14 @@ type FrameHandler struct {
+@@ -251,11 +426,14 @@ type FrameHandler struct {
  }
  
  func NewFrameHandler(verbose bool) *FrameHandler {
@@ -226,7 +249,72 @@ index db5bf07..b56a67c 100644
  }
  
  func (h *FrameHandler) Recv() <-chan *Packet {
-@@ -423,7 +591,7 @@ func (h *FrameHandler) handleVideo(channel byte, hdr *PacketHeader, payload []by
+@@ -384,11 +562,41 @@ func (h *FrameHandler) handleVideo(channel byte, hdr *PacketHeader, payload []by
+ 		cs.pktTotal = hdr.PktTotal
+ 	}
+ 
+-	// If packet index doesn't match expected, reset (data loss)
+-	if hdr.PktIdx != cs.waitSeq {
+-		fmt.Printf("[OOO] ch=0x%02x #%d frameType=0x%02x pktTotal=%d expected pkt %d, got %d - reset\n",
+-			channel, hdr.FrameNo, hdr.FrameType, hdr.PktTotal, cs.waitSeq, hdr.PktIdx)
+-		cs.reset()
++	// Packets do not always arrive in order on a busy wireless link, and a
++	// keyframe can run to well over a hundred of them.  Throwing the frame
++	// away on the first one out of sequence used to cost the whole picture:
++	// reset() clears frameNo, so every remaining packet of that same frame
++	// then looked like a new frame, reset again, and was dropped in turn --
++	// one displaced packet losing the lot, and printing a line per packet
++	// while it did.  Hold them instead until the gap ahead fills.
++	switch {
++	case hdr.PktIdx < cs.waitSeq:
++		// Already assembled: a duplicate, or a retransmission that lost its
++		// race.  Nothing to do.
++		return
++
++	case hdr.PktIdx > cs.waitSeq:
++		if len(cs.pending) >= maxPendingPackets {
++			// Something ahead is not coming back; let the frame go rather
++			// than hold an unbounded amount of it.
++			if h.verbose {
++				fmt.Printf("[OOO] ch=0x%02x #%d holding %d packets, giving up\n",
++					channel, hdr.FrameNo, len(cs.pending))
++			}
++			return
++		}
++		if cs.pending == nil {
++			cs.pending = make(map[uint16][]byte)
++		}
++		if _, held := cs.pending[hdr.PktIdx]; !held {
++			// The read buffer underneath is reused, so keep our own copy.
++			buf := make([]byte, len(payload))
++			copy(buf, payload)
++			cs.pending[hdr.PktIdx] = buf
++		}
++		if fi != nil {
++			cs.frameInfo = fi
++		}
+ 		return
+ 	}
+ 
+@@ -405,6 +613,17 @@ func (h *FrameHandler) handleVideo(channel byte, hdr *PacketHeader, payload []by
+ 		cs.frameInfo = fi
+ 	}
+ 
++	// Now that the gap is closed, take anything that was waiting behind it.
++	for len(cs.pending) > 0 {
++		buf, held := cs.pending[cs.waitSeq]
++		if !held {
++			break
++		}
++		delete(cs.pending, cs.waitSeq)
++		cs.waitData = append(cs.waitData, buf...)
++		cs.waitSeq++
++	}
++
+ 	// Check if frame is complete
+ 	if cs.waitSeq != cs.pktTotal || cs.frameInfo == nil {
+ 		return
+@@ -423,7 +642,7 @@ func (h *FrameHandler) handleVideo(channel byte, hdr *PacketHeader, payload []by
  		return
  	}
  
@@ -235,7 +323,7 @@ index db5bf07..b56a67c 100644
  	rtpTS := uint32(accumUS * 90000 / 1000000)
  
  	pkt := &Packet{
-@@ -471,7 +639,7 @@ func (h *FrameHandler) handleAudio(payload []byte, fi *FrameInfo) {
+@@ -471,7 +690,7 @@ func (h *FrameHandler) handleAudio(payload []byte, fi *FrameInfo) {
  		channels = fi.Channels()
  	}
  
@@ -244,6 +332,255 @@ index db5bf07..b56a67c 100644
  	rtpTS := uint32(accumUS * uint64(sampleRate) / 1000000)
  
  	payloadCopy := make([]byte, len(payload))
+diff --git a/pkg/tutk/frame_reassembly_test.go b/pkg/tutk/frame_reassembly_test.go
+new file mode 100644
+index 0000000..0edd30c
+--- /dev/null
++++ b/pkg/tutk/frame_reassembly_test.go
+@@ -0,0 +1,243 @@
++package tutk
++
++import (
++	"bytes"
++	"testing"
++)
++
++// The camera splits a frame across many packets — a 2K keyframe runs to well
++// over a hundred — and on a busy wireless link they do not always arrive in
++// order.  These tests cover what the reassembler makes of that.
++
++const testChannel = 0x07
++
++func videoFrameInfo(frameNo uint32, payloadSize uint32) *FrameInfo {
++	return &FrameInfo{
++		CodecID:     CodecH264,
++		Timestamp:   500000,
++		PayloadSize: payloadSize,
++		FrameNo:     frameNo,
++	}
++}
++
++// feed delivers one packet of a frame.  The frame info rides on the last
++// packet, the way the camera sends it.
++func feed(h *FrameHandler, frameNo uint32, idx, total uint16, payload []byte, size uint32) {
++	var fi *FrameInfo
++	if idx == total-1 {
++		fi = videoFrameInfo(frameNo, size)
++	}
++	h.handleVideo(testChannel, &PacketHeader{
++		Channel:  testChannel,
++		FrameNo:  frameNo,
++		PktIdx:   idx,
++		PktTotal: total,
++	}, payload, fi)
++}
++
++// packetsFor builds a frame of `total` packets whose payloads identify their
++// own position, so a wrongly ordered reassembly is visible rather than silent.
++func packetsFor(total int) ([][]byte, []byte) {
++	parts := make([][]byte, total)
++	var whole []byte
++	for i := range parts {
++		parts[i] = []byte{byte(i), byte(i >> 8), 0xAA}
++		whole = append(whole, parts[i]...)
++	}
++	return parts, whole
++}
++
++func collect(h *FrameHandler) *Packet {
++	select {
++	case pkt := <-h.output:
++		return pkt
++	default:
++		return nil
++	}
++}
++
++func TestFrameAssemblesInOrder(t *testing.T) {
++	h := NewFrameHandler(false)
++	parts, whole := packetsFor(6)
++
++	for i, p := range parts {
++		feed(h, 42, uint16(i), 6, p, uint32(len(whole)))
++	}
++
++	pkt := collect(h)
++	if pkt == nil {
++		t.Fatal("no frame came out")
++	}
++	if !bytes.Equal(pkt.Payload, whole) {
++		t.Fatalf("payload %v, want %v", pkt.Payload, whole)
++	}
++}
++
++func TestFrameAssemblesOutOfOrder(t *testing.T) {
++	h := NewFrameHandler(false)
++	parts, whole := packetsFor(6)
++
++	// 0, then 2 and 3 ahead of their turn, then the 1 that unblocks them.
++	for _, i := range []int{0, 2, 3, 1, 5, 4} {
++		feed(h, 42, uint16(i), 6, parts[i], uint32(len(whole)))
++	}
++
++	pkt := collect(h)
++	if pkt == nil {
++		t.Fatal("reordering lost the frame")
++	}
++	if !bytes.Equal(pkt.Payload, whole) {
++		t.Fatalf("reassembled out of order: %v, want %v", pkt.Payload, whole)
++	}
++}
++
++func TestFrameAssemblesFromAHeavilyShuffledBurst(t *testing.T) {
++	const total = 140 // about what a 2K keyframe takes
++	h := NewFrameHandler(false)
++	parts, whole := packetsFor(total)
++
++	// Everything but the first packet arrives first, in reverse; the frame
++	// can only complete once the straggler lands.
++	for i := total - 1; i >= 1; i-- {
++		feed(h, 7, uint16(i), total, parts[i], uint32(len(whole)))
++	}
++	if pkt := collect(h); pkt != nil {
++		t.Fatal("frame completed before its first packet arrived")
++	}
++
++	feed(h, 7, 0, total, parts[0], uint32(len(whole)))
++
++	pkt := collect(h)
++	if pkt == nil {
++		t.Fatal("frame never completed")
++	}
++	if !bytes.Equal(pkt.Payload, whole) {
++		t.Fatal("reassembled payload is not in packet order")
++	}
++}
++
++func TestDuplicatePacketsAreIgnored(t *testing.T) {
++	h := NewFrameHandler(false)
++	parts, whole := packetsFor(4)
++
++	feed(h, 1, 0, 4, parts[0], uint32(len(whole)))
++	feed(h, 1, 0, 4, parts[0], uint32(len(whole))) // retransmission
++	feed(h, 1, 2, 4, parts[2], uint32(len(whole)))
++	feed(h, 1, 2, 4, parts[2], uint32(len(whole))) // held twice
++	feed(h, 1, 1, 4, parts[1], uint32(len(whole)))
++	feed(h, 1, 3, 4, parts[3], uint32(len(whole)))
++
++	pkt := collect(h)
++	if pkt == nil {
++		t.Fatal("no frame came out")
++	}
++	if !bytes.Equal(pkt.Payload, whole) {
++		t.Fatalf("duplicates corrupted the payload: %v, want %v", pkt.Payload, whole)
++	}
++}
++
++func TestAPacketThatNeverArrivesDoesNotProduceAFrame(t *testing.T) {
++	h := NewFrameHandler(false)
++	parts, whole := packetsFor(5)
++
++	// Packet 2 is lost outright.  A frame must not be emitted with a hole in
++	// it — half a picture decoded as whole is worse than none.
++	for _, i := range []int{0, 1, 3, 4} {
++		feed(h, 9, uint16(i), 5, parts[i], uint32(len(whole)))
++	}
++
++	if pkt := collect(h); pkt != nil {
++		t.Fatalf("emitted a frame missing a packet: %d bytes", len(pkt.Payload))
++	}
++}
++
++func TestANewFrameClearsWhatWasHeldForTheOldOne(t *testing.T) {
++	h := NewFrameHandler(false)
++	parts, whole := packetsFor(4)
++
++	// Abandon a frame midway, holding a packet for it.
++	feed(h, 10, 0, 4, parts[0], uint32(len(whole)))
++	feed(h, 10, 3, 4, parts[3], uint32(len(whole)))
++
++	// The next frame must not inherit any of that.
++	next, nextWhole := packetsFor(4)
++	for i := range next {
++		feed(h, 11, uint16(i), 4, next[i], uint32(len(nextWhole)))
++	}
++
++	pkt := collect(h)
++	if pkt == nil {
++		t.Fatal("the following frame did not complete")
++	}
++	if pkt.FrameNo != 11 {
++		t.Fatalf("got frame %d, want 11", pkt.FrameNo)
++	}
++	if !bytes.Equal(pkt.Payload, nextWhole) {
++		t.Fatal("leftovers from the abandoned frame leaked into the next one")
++	}
++}
++
++func TestHeldPacketsAreBounded(t *testing.T) {
++	h := NewFrameHandler(false)
++	const total = maxPendingPackets + 50
++
++	// Packet 0 never comes, so everything after it piles up.  The hold has to
++	// stop somewhere rather than grow with the stream.
++	for i := 1; i < total; i++ {
++		feed(h, 3, uint16(i), uint16(total), []byte{0xAA, 0xBB}, uint32(total*2))
++	}
++
++	cs := h.channels[testChannel]
++	if cs == nil {
++		t.Fatal("no channel state")
++	}
++	if len(cs.pending) > maxPendingPackets {
++		t.Fatalf("held %d packets, cap is %d", len(cs.pending), maxPendingPackets)
++	}
++}
++
++// legacyReassemble is the behaviour this replaces: any packet out of sequence
++// threw the frame away.  Worse, the reset cleared frameNo too, so the packets
++// still to come for that same frame each looked like a brand new one and were
++// dropped in turn — one displaced packet costing the whole picture, and a log
++// line per packet on the way out.
++func legacyReassemble(order []int, total int, parts [][]byte) []byte {
++	var frameNo uint32
++	var waitSeq uint16
++	var data []byte
++	for _, idx := range order {
++		const thisFrame = 42
++		if uint32(thisFrame) != frameNo {
++			frameNo, waitSeq, data = thisFrame, 0, nil
++		}
++		if uint16(idx) != waitSeq {
++			frameNo, waitSeq, data = 0, 0, nil // reset() cleared frameNo
++			continue
++		}
++		data = append(data, parts[idx]...)
++		waitSeq++
++	}
++	if int(waitSeq) != total {
++		return nil
++	}
++	return data
++}
++
++func TestLegacyReassemblyLostTheFrame(t *testing.T) {
++	parts, whole := packetsFor(6)
++	order := []int{0, 2, 3, 1, 5, 4}
++
++	if got := legacyReassemble(order, 6, parts); got != nil {
++		t.Fatalf("expected the old reassembly to lose this frame, it produced %d bytes", len(got))
++	}
++
++	// And the replacement puts the same packets back together.
++	h := NewFrameHandler(false)
++	for _, i := range order {
++		feed(h, 42, uint16(i), 6, parts[i], uint32(len(whole)))
++	}
++	pkt := collect(h)
++	if pkt == nil || !bytes.Equal(pkt.Payload, whole) {
++		t.Fatal("the replacement should recover the frame the old code dropped")
++	}
++}
 diff --git a/pkg/tutk/frame_ts_sim_test.go b/pkg/tutk/frame_ts_sim_test.go
 new file mode 100644
 index 0000000..8c7678a
